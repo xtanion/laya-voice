@@ -4,6 +4,7 @@
     uv run laya-voice --hold              # Caps Lock: hold to talk (tap = toggle), no wake word
     uv run laya-voice --always-on         # open mic, every utterance is a command (no wake word)
     uv run laya-voice --ptt               # press Enter to talk, Enter to stop
+    uv run laya-voice --remote            # hold the button on the ESP32 voice module
     uv run laya-voice --text "open chrome and go to youtube"      # no mic
     uv run laya-voice --text "..." --dry-run                        # plan only
     uv run laya-voice --goal "reply to the last email from Sam saying yes"   # multi-step agent, no mic
@@ -277,11 +278,14 @@ class Session:
         self.stt.start()
         self.brain = Brain()
         self.speaker = Speaker(enabled=not args.quiet)
-        self.listener = Listener(device=args.device)
-        self.listener.start()
+        self.listener = None
+        if not getattr(args, "remote", False):
+            self.listener = Listener(device=args.device)
+            self.listener.start()
 
     def close(self) -> None:
-        self.listener.stop()
+        if self.listener:
+            self.listener.stop()
         self.stt.stop()
 
     def process(self, pcm: np.ndarray) -> bool:
@@ -295,6 +299,8 @@ class Session:
             print("  (heard nothing)")
             return True
         print(f"🗣  {text}   ({len(pcm)/config.SAMPLE_RATE:.1f}s audio, stt {stt_ms}ms)")
+        if not self.listener:
+            return handle(self.brain, self.speaker, text, self.args.dry_run)
         self.listener.pause(0.3)
         ok = handle(self.brain, self.speaker, text, self.args.dry_run)
         if self.speaker.speaking():
@@ -502,6 +508,32 @@ def run_capslock(s: Session) -> None:
             break
 
 
+def run_remote(s: Session) -> None:
+    """Hold the button on the ESP32 voice module to talk, release to run."""
+    from .remote import BleReceiver
+
+    done: queue.Queue[np.ndarray] = queue.Queue()
+
+    def on_press() -> None:
+        s.speaker.interrupt()
+        ding(SOUND_START)
+        OVERLAY.set("listening", "Listening…")
+
+    def on_audio(pcm: np.ndarray) -> None:
+        ding(SOUND_STOP)
+        done.put(pcm)
+
+    ble = BleReceiver(on_press, on_audio, on_event=lambda m: print(f"  [module] {m}"))
+    ble.start()
+    print(f"Looking for the voice module over Bluetooth. Hold its button and speak. ({s.brain.label}, whisper base.en)")
+    try:
+        while True:
+            if not s.process(done.get()):
+                break
+    finally:
+        ble.stop()
+
+
 def run_always_on(s: Session) -> None:
     print(f"🎙  Listening ({s.brain.label}, whisper base.en). Say 'stop listening' to quit.")
     s.speaker.say(flavor("Ready."))
@@ -549,6 +581,8 @@ def run_voice(args: argparse.Namespace) -> None:
                 run_ptt(s)
             elif args.always_on:
                 run_always_on(s)
+            elif args.remote:
+                run_remote(s)
             elif args.hold:
                 run_capslock(s)
             else:
@@ -569,6 +603,7 @@ def main() -> None:
     p.add_argument("--hold", action="store_true", help="Caps Lock hold-to-talk only, no wake word")
     p.add_argument("--always-on", action="store_true", help="open mic, every utterance is a command (no wake word)")
     p.add_argument("--ptt", action="store_true", help="push-to-talk in the terminal (Enter to start/stop)")
+    p.add_argument("--remote", action="store_true", help="push-to-talk from the ESP32 voice module over Bluetooth LE")
     p.add_argument("--device", help="input device index or name substring (see `uv run python -m sounddevice`)")
     p.add_argument("--quiet", action="store_true", help="no spoken replies")
     p.add_argument("--no-overlay", action="store_true", help="no floating transcription pill")

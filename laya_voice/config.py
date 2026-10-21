@@ -37,6 +37,9 @@ WHISPER_PORT = int(os.environ.get("WHISPER_PORT", "8178"))
 WHISPER_THREADS = int(os.environ.get("WHISPER_THREADS", "6"))
 
 SAMPLE_RATE = 16000
+
+BLE_DEVICE = os.environ.get("BLE_DEVICE", "")
+REMOTE_MAX_SECONDS = float(os.environ.get("REMOTE_MAX_SECONDS", "15"))
 TTS_VOICE = os.environ.get("TTS_VOICE", "Samantha")
 TTS_RATE = int(os.environ.get("TTS_RATE", "210"))
 

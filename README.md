@@ -35,8 +35,19 @@ laya --hold                          # hold CAPS LOCK to talk, release to run; n
 laya --always-on                     # open mic, EVERY utterance is a command (no wake word)
 laya --ptt                           # push-to-talk in the terminal: Enter start / Enter stop
 laya --device "RØDE"                 # pick a mic (uv run python -m sounddevice)
+laya --remote                        # hold the button on the ESP32 voice module (Bluetooth LE)
 laya --text "open chrome and go to youtube" --dry-run   # test routing, no mic
 ```
+
+**Voice module (`--remote`):** an ESP32 with an INMP441 mic streams IMA-ADPCM audio
+over Bluetooth LE while its button is held (`firmware/voice_module`). Wiring: INMP441
+VDD→3V3, GND→GND, L/R→GND, SCK→GPIO26, WS→GPIO25, SD→GPIO33; button between GPIO0
+(the BOOT button by default) and GND. Flash with
+`cd firmware/voice_module && uvx --from platformio pio run -t upload -t monitor`.
+The module only streams over an encrypted link, so accept the pairing request on first
+connect; the terminal app needs the Bluetooth permission. Once connected, set
+`BLE_DEVICE` in `.env` to the printed address so no other device can stand in for it.
+If the monitor prints `peak 0`, check the wiring or build with `-DMIC_RIGHT_CHANNEL=1`.
 
 **Hands-free mode (default):** the mic stays open and whisper transcribes every
 utterance locally (~100 ms, nothing leaves the machine). Only utterances that name
