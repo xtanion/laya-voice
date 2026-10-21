@@ -1,6 +1,6 @@
 # Fine-tuning plan: Laya for laya-voice
 
-Status: step 0 done; step 1 built, waiting on paraphrase generation (2026-10-21). Baseline: commit `f85c219`, `data/eval` v1, threshold 0.35.
+Status: step 0 done; step 1 data built except ASR noise (2026-10-21). Baseline: commit `f85c219`, `data/eval` v1, threshold 0.35.
 
 | | dev (62) | test (53, held out) |
 |---|---|---|
@@ -103,9 +103,13 @@ Separate from `data/eval`; never trained on dev or test. Target ~2-3k utterances
 **Step 1 status:** `laya_voice/training.py` (templates, row builder, dedupe) and
 `laya_voice/paraphrase.py` (77 seeds, ~2,000 phrasings requested from `claude-opus-5-5`,
 cached to `data/train/paraphrases.v1.jsonl`) are in place; see `data/train/README.md`.
-Templates alone: 653 rows / 2,216 items, 85 dropped as near-eval, 56 rows with no
-matching text candidate; `laya-train --dry-run` accepts all items (0 skipped) and plans
-128 optimizer updates over 4 epochs. ASR-noise generation is not built yet.
+The v1 paraphrases (1,984, all passing cleaning) were written in-session by Claude and
+imported with `--import` instead of the API. Templates plus paraphrases: 2,391 rows /
+8,337 items (653 template, 1,738 paraphrase rows), 142 dropped as near-eval, 190
+duplicates, 152 rows with no matching text candidate; `laya-train --dry-run` accepts all
+items (0 skipped) and plans 500 optimizer updates over 4 epochs. Imbalance to watch:
+shortcut is 1,013 rows, rejects (`none`) 147, stop 22, screenshot 19. ASR-noise
+generation is not built yet.
 
 ### 2. Dry run
 
@@ -116,6 +120,25 @@ skipped/truncated options, optimizer update count (watch the collapse warning).
 
 One epoch, `--freeze-encoder`, subset, on MPS: confirm it runs, measure time per
 epoch and memory. No training-time estimate until measured.
+
+**Pilot result (2026-10-22):** ran as a full fine-tune instead (encoder not frozen), one
+epoch over all of v1, `--device mps --micro-batch 2 --grad-accum 32 --shuffle-options
+--loss soft-ce`. The default micro-batch 8 thrashes swap on the M4 16 GB; micro-batch 2
+works (~3 GB RSS). 125 optimizer updates in 50 min. Log: `results/pilot-train.log`.
+
+| dev, threshold 0.35 | step 0 | pilot |
+|---|---|---|
+| command accuracy | 57.1% | 94.6% |
+| action accuracy | 73.2% | 100.0% |
+| false action rate | 12.9% | 0.0% |
+| reject rate | 83.3% | 100.0% |
+| missed rate | | 5.4% |
+| mean latency | ~250 ms | 370 ms |
+
+Dev failures (3, all held, none executed): "close the window" -> minimize_window (0.33),
+"find lofi hip hop on youtube" -> query cut wrong by the code-side candidates (0.03),
+"scroll dawn" right but 0.29. Caveat: training paraphrases, templates and the eval set
+were all written by Claude, so dev may share their phrasing; test is still unused.
 
 ### 4. Runs (all with `--shuffle-options`)
 

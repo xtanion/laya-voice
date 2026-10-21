@@ -5,13 +5,16 @@ Rows for `laya-train` (`{state, questions, expected}`), built by `laya_voice/tra
 ```sh
 uv run python -m laya_voice.paraphrase --dry-run   # seeds and prompts, no API calls
 uv run python -m laya_voice.paraphrase             # Claude paraphrases -> paraphrases.v1.jsonl (needs ANTHROPIC_API_KEY)
+uv run python -m laya_voice.paraphrase --import F  # or cache a {family: [phrasings]} JSON file, same cleaning
 uv run python -m laya_voice.training               # templates + paraphrases -> v1.jsonl and v1.stats.json
 USE_TF=0 uv run laya-train --data data/train/v1.jsonl --dry-run --shuffle-options --loss soft-ce
 ```
 
 - **Sources:** hand-written phrases and slot templates (`template_utterances`), plus
   Claude paraphrases of one seed per label (`paraphrase.seeds`). Paraphrases are cached in
-  `paraphrases.v1.jsonl` and committed, so `v1.jsonl` rebuilds without the API.
+  `paraphrases.v1.jsonl` and committed, so `v1.jsonl` rebuilds without the API. The v1 set
+  (77 seeds, 1,984 phrasings) was written by Claude in a Claude Code session and imported
+  with `--import`; its records say `claude-opus-5-5 (session)`.
 - **Rendering:** every row's questions come from Brain's staged path (`for_staged`,
   `stage_keys`, the shortcut group round, the app shortlist), with state
   `{"utterance": ...}`. `tests/test_training.py` checks that a row's questions are exactly

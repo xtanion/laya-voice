@@ -1,5 +1,6 @@
 """Offline contracts for the training-data builder and paraphrase cleaning. No models, no API."""
 
+import json
 import random
 from collections import Counter
 
@@ -185,3 +186,21 @@ def test_prompt_mentions_keep_words_and_count():
     s = seed()
     text = paraphrase.prompt(s)
     assert "'buy milk'" in text and "Write 25" in text
+
+
+def test_import_file_cleans_and_records_source(tmp_path, monkeypatch):
+    out = tmp_path / "p.jsonl"
+    monkeypatch.setattr(training, "PARAPHRASES", out)
+    src = tmp_path / "in.json"
+    src.write_text('{"media.next": ["Skip!", "skip", "next track"]}')
+    paraphrase.import_file(str(src), paraphrase.seeds(), "test")
+    rec = json.loads(out.read_text())
+    assert rec["family"] == "media.next" and rec["model"] == "test"
+    assert rec["phrasings"] == ["skip", "next track"] and rec["returned"] == 3
+
+
+def test_import_file_rejects_unknown_family(tmp_path):
+    src = tmp_path / "in.json"
+    src.write_text('{"media.nope": ["x"]}')
+    with pytest.raises(SystemExit):
+        paraphrase.import_file(str(src), paraphrase.seeds(), "test")

@@ -1,0 +1,55 @@
+{
+  "rows": 2391,
+  "items": 8337,
+  "by_source": {
+    "paraphrase": 1738,
+    "template": 653
+  },
+  "by_action": {
+    "shortcut": 1013,
+    "open_app": 234,
+    "web_search": 187,
+    "type_text": 147,
+    "none": 147,
+    "volume": 146,
+    "open_website": 124,
+    "scroll": 99,
+    "system": 98,
+    "media": 75,
+    "new_item": 48,
+    "open_folder": 32,
+    "stop": 22,
+    "screenshot": 19
+  },
+  "items_by_question": {
+    "action": 2391,
+    "addressed": 2322,
+    "shortcut_group": 1013,
+    "shortcut": 1013,
+    "app": 245,
+    "text": 216,
+    "engine": 187,
+    "volume_op": 146,
+    "site": 124,
+    "compound": 112,
+    "scroll_dir": 99,
+    "system_op": 98,
+    "media_op": 75,
+    "in_app": 59,
+    "submit": 55,
+    "scroll_amount": 54,
+    "new_kind": 48,
+    "has_title": 48,
+    "folder": 32
+  },
+  "dropped": {
+    "dropped_near_eval": 142,
+    "dropped_duplicate": 190
+  },
+  "misses": {
+    "text_not_a_candidate": 152
+  },
+  "questions_version": 1,
+  "questions_fingerprint": "ed9da008fbc33d1f",
+  "sha256": "e01db5a88c59e59d"
+}

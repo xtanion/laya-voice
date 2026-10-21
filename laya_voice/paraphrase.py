@@ -2,11 +2,13 @@
 
     uv run python -m laya_voice.paraphrase --dry-run      # list seeds and the prompt, no API calls
     uv run python -m laya_voice.paraphrase                # call Claude for seeds not yet cached
+    uv run python -m laya_voice.paraphrase --import F     # cache phrasings from a {family: [phrasings]} JSON file
 
 Results are appended to data/train/paraphrases.v1.jsonl, which is committed so the training
 set rebuilds without the API. Seeds already in that file are skipped. Each phrasing must keep
 its slot values verbatim and pass the same gates the runtime uses (submit, stop), otherwise it
-is dropped before it is cached. Needs ANTHROPIC_API_KEY (environment or .env).
+is dropped before it is cached. API calls need ANTHROPIC_API_KEY (environment or .env); --import
+does not, and records the given --source instead of the API model.
 """
 from __future__ import annotations
 
@@ -162,11 +164,31 @@ def cached_families() -> set[str]:
     return {json.loads(line)["family"] for line in training.PARAPHRASES.read_text().splitlines() if line.strip()}
 
 
+def record(s: Seed, raw: list[str], source: str) -> dict[str, Any]:
+    return {"family": s.family, "seed": s.seed, "expect": s.expect, "model": source, "requested": s.n,
+            "returned": len(raw), "phrasings": clean(s, raw)}
+
+
+def import_file(path: str, todo: list[Seed], source: str) -> None:
+    given = json.loads(open(path).read())
+    unknown = set(given) - {s.family for s in seeds()}
+    if unknown:
+        raise SystemExit(f"unknown families: {sorted(unknown)}")
+    with training.PARAPHRASES.open("a") as f:
+        for s in todo:
+            if s.family in given:
+                rec = record(s, given[s.family], source)
+                f.write(json.dumps(rec) + "\n")
+                print(f"  {s.family}: kept {len(rec['phrasings'])}/{rec['returned']}")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(prog="laya-paraphrase", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--workers", type=int, default=6)
     p.add_argument("--only", nargs="*", help="limit to these families")
+    p.add_argument("--import", dest="import_path", help="cache phrasings from a {family: [phrasings]} JSON file")
+    p.add_argument("--source", default=f"{MODEL} (session)", help="model label recorded for --import")
     args = p.parse_args()
 
     done = cached_families()
@@ -177,12 +199,15 @@ def main() -> None:
         for s in todo:
             print(f"\n[{s.family}] -> {s.expect}\n{prompt(s)}")
         return
+    training.PARAPHRASES.parent.mkdir(parents=True, exist_ok=True)
+    if args.import_path:
+        import_file(args.import_path, todo, args.source)
+        return
 
     import anthropic
 
     client = anthropic.Anthropic()
     lock = threading.Lock()
-    training.PARAPHRASES.parent.mkdir(parents=True, exist_ok=True)
     with ThreadPoolExecutor(args.workers) as pool:
         futures = {pool.submit(generate, client, s): s for s in todo}
         for fut in as_completed(futures):
@@ -192,12 +217,10 @@ def main() -> None:
             except (anthropic.APIError, RuntimeError, ValueError, KeyError) as e:
                 print(f"  ! {s.family}: {e}")
                 continue
-            kept = clean(s, raw)
-            rec = {"family": s.family, "seed": s.seed, "expect": s.expect, "model": MODEL, "requested": s.n,
-                   "returned": len(raw), "phrasings": kept}
+            rec = record(s, raw, MODEL)
             with lock, training.PARAPHRASES.open("a") as f:
                 f.write(json.dumps(rec) + "\n")
-            print(f"  {s.family}: kept {len(kept)}/{len(raw)}")
+            print(f"  {s.family}: kept {len(rec['phrasings'])}/{len(raw)}")
 
 
 if __name__ == "__main__":
