@@ -23,7 +23,7 @@ import httpx
 
 from . import config
 
-CACHE_DIR = Path(os.environ.get("JEV_TTS_CACHE", Path.home() / ".cache" / "jev-voice" / "tts"))
+CACHE_DIR = Path(os.environ.get("JEV_TTS_CACHE", Path.home() / ".cache" / "laya-voice" / "tts"))
 ENGINE = os.environ.get("TTS_ENGINE", "elevenlabs" if os.environ.get("ELEVENLABS_API_KEY") else "say")
 KOKORO_DIR = Path(os.environ.get("KOKORO_DIR", Path(__file__).resolve().parent.parent / "models" / "kokoro"))
 KOKORO_VOICE = os.environ.get("KOKORO_VOICE", "af_heart")  # open-source Kokoro-82M voices: af_heart, af_bella, am_michael, bm_george…

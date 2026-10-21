@@ -386,51 +386,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "jev-voice"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "anthropic" },
-    { name = "chess" },
-    { name = "httpx" },
-    { name = "jev-ultrafast" },
-    { name = "kokoro-onnx" },
-    { name = "numpy" },
-    { name = "pyobjc-framework-applicationservices" },
-    { name = "pyobjc-framework-cocoa" },
-    { name = "pyobjc-framework-quartz" },
-    { name = "sounddevice" },
-    { name = "soundfile" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "anthropic", specifier = ">=1.7.0" },
-    { name = "chess", specifier = ">=1.11.2" },
-    { name = "httpx", specifier = ">=0.28.1" },
-    { name = "jev-ultrafast", git = "https://github.com/browser-use/jev-ultrafast.git" },
-    { name = "kokoro-onnx", specifier = ">=0.6.1" },
-    { name = "numpy", specifier = ">=2.5.3" },
-    { name = "pyobjc-framework-applicationservices", specifier = ">=12.2.2" },
-    { name = "pyobjc-framework-cocoa", specifier = ">=12.2.2" },
-    { name = "pyobjc-framework-quartz", specifier = ">=12.2.2" },
-    { name = "sounddevice", specifier = ">=0.5.6" },
-    { name = "soundfile", specifier = ">=0.14.0" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=8.4,<9" },
-    { name = "ruff", specifier = ">=0.14,<1" },
-]
-
-[[package]]
 name = "jiter"
 version = "0.17.0"
 source = { registry = "https://pypi.org/simple" }
@@ -550,6 +505,51 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/6b/ef/b58dedba0a1417f16352352787fbcfcbaa0b907e284c2ea3ebaf5541109a/kokoro_onnx-0.6.1.tar.gz", hash = "sha256:7bbdb66dd53775f71088a99999a9aefdad240740daf54cb09410d8bb1e294e35", size = 69799, upload-time = "2026-08-19T00:40:37.021Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/60/e1/a27e5a70a525a5ee1fd5357596f07b724d02ff317f134e86cb6e3d9db968/kokoro_onnx-0.6.1-py3-none-any.whl", hash = "sha256:50c8de4950d601df41428ee5462a48c8a78bef441bf671f2492e070ef44d8a32", size = 26084, upload-time = "2026-08-19T00:40:35.746Z" },
+]
+
+[[package]]
+name = "laya-voice"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "anthropic" },
+    { name = "chess" },
+    { name = "httpx" },
+    { name = "jev-ultrafast" },
+    { name = "kokoro-onnx" },
+    { name = "numpy" },
+    { name = "pyobjc-framework-applicationservices" },
+    { name = "pyobjc-framework-cocoa" },
+    { name = "pyobjc-framework-quartz" },
+    { name = "sounddevice" },
+    { name = "soundfile" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "anthropic", specifier = ">=1.7.0" },
+    { name = "chess", specifier = ">=1.11.2" },
+    { name = "httpx", specifier = ">=0.28.1" },
+    { name = "jev-ultrafast", git = "https://github.com/browser-use/jev-ultrafast.git" },
+    { name = "kokoro-onnx", specifier = ">=0.6.1" },
+    { name = "numpy", specifier = ">=2.5.3" },
+    { name = "pyobjc-framework-applicationservices", specifier = ">=12.2.2" },
+    { name = "pyobjc-framework-cocoa", specifier = ">=12.2.2" },
+    { name = "pyobjc-framework-quartz", specifier = ">=12.2.2" },
+    { name = "sounddevice", specifier = ">=0.5.6" },
+    { name = "soundfile", specifier = ">=0.14.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=8.4,<9" },
+    { name = "ruff", specifier = ">=0.14,<1" },
 ]
 
 [[package]]

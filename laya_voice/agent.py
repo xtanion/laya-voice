@@ -3,8 +3,8 @@
 Port of jev-ultrafast/agent.py: observe → one Jev request (operation + speculative targets)
 → consume the matching target → execute against a code-owned AX node → log → observe.
 
-    uv run jev-agent --goal "open notes and write buy milk"
-    uv run jev-agent --goal "..." --choose      # pause before each execution
+    uv run laya-agent --goal "open notes and write buy milk"
+    uv run laya-agent --goal "..." --choose      # pause before each execution
 """
 from __future__ import annotations
 
@@ -319,7 +319,7 @@ def run_browser(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(prog="jev-agent", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(prog="laya-agent", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--goal", action="append", required=True, help="Natural-language goal. Repeat for an ordered list.")
     p.add_argument("--choose", action="store_true", help="pause for Enter before each execution")
     p.add_argument("--record", help="directory for screenshots after every step")

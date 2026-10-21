@@ -1,4 +1,4 @@
-# Jev Voice
+# Laya Voice
 
 Talk to your Mac. You speak, it opens apps, types, searches, scrolls, presses keys.
 
@@ -20,7 +20,7 @@ cp .env.example .env                       # add your TYPESAFE_API_KEY from cons
 
 The script installs whisper-cpp + ffmpeg, downloads the model, syncs the Python
 env, remaps **Caps Lock → F18** with `hidutil` (persisted by a LaunchAgent so it
-survives reboots), installs a `jev` launcher in `~/.local/bin`, and opens the
+survives reboots), installs a `laya` launcher in `~/.local/bin`, and opens the
 three permission panes. Grant the terminal app you launch from (Cursor / Terminal /
 iTerm) **Microphone**, **Accessibility** and **Input Monitoring**. If a permission
 is missing at launch, Jev Voice prompts for it and waits.
@@ -30,12 +30,12 @@ Undo the Caps Lock remap any time: `./scripts/uninstall-capslock.sh`.
 ## Run
 
 ```sh
-jev                                 # hands-free: "Alfred, open chrome" (or tap CAPS LOCK, then speak)
-jev --hold                          # hold CAPS LOCK to talk, release to run; no wake word
-jev --always-on                     # open mic, EVERY utterance is a command (no wake word)
-jev --ptt                           # push-to-talk in the terminal: Enter start / Enter stop
-jev --device "RØDE"                 # pick a mic (uv run python -m sounddevice)
-jev --text "open chrome and go to youtube" --dry-run   # test routing, no mic
+laya                                 # hands-free: "Alfred, open chrome" (or tap CAPS LOCK, then speak)
+laya --hold                          # hold CAPS LOCK to talk, release to run; no wake word
+laya --always-on                     # open mic, EVERY utterance is a command (no wake word)
+laya --ptt                           # push-to-talk in the terminal: Enter start / Enter stop
+laya --device "RØDE"                 # pick a mic (uv run python -m sounddevice)
+laya --text "open chrome and go to youtube" --dry-run   # test routing, no mic
 ```
 
 **Hands-free mode (default):** the mic stays open and whisper transcribes every
@@ -80,9 +80,9 @@ AX tree of the frontmost window ─► indexed element table ─► one Jev requ
 ```
 
 ```sh
-jev-agent --goal "open notes and write buy milk"          # from the terminal
-jev-agent --goal "..." --choose --elements                # pause before each step, show the table
-jev --goal "reply to the last email from Sam saying yes"  # same loop, spoken reply
+laya-agent --goal "open notes and write buy milk"          # from the terminal
+laya-agent --goal "..." --choose --elements                # pause before each step, show the table
+laya --goal "reply to the last email from Sam saying yes"  # same loop, spoken reply
 ```
 
 By voice, Jev routes an utterance to `task` when it needs several on-screen steps
@@ -106,7 +106,7 @@ tick **Allow remote debugging for this browser instance** at `chrome://inspect/#
 and click Allow. `TASK_DRIVER=desktop` switches to the experimental Accessibility-tree port.
 
 ```sh
-jev-agent --url https://www.autotrader.ca --recommend \
+laya-agent --url https://www.autotrader.ca --recommend \
   --goal "Find a used 2020 Mercedes-Benz CLA under \$15,000 CAD near Toronto. Postal code M5V 3L9. Stop when the filtered listings are visible."
 ```
 
@@ -126,7 +126,7 @@ Without `TEXT_MODEL_API_KEY`, TYPE_TEXT values are Jev choices over spans cut fr
 ### Chess on chess.com (Stockfish proposes, Jev chooses, code moves)
 
 ```sh
-uv run jev-agent --chess --url https://www.chess.com --goal "On chess.com, start a game and stop when a live board is on screen."
+uv run laya-agent --chess --url https://www.chess.com --goal "On chess.com, start a game and stop when a live board is on screen."
 ```
 
 Jev gets the tab to a live game (Play, matchmaking, or resuming a game already open). From there, each turn:
@@ -146,7 +146,7 @@ Engine play in rated games is against chess.com's fair-play rules; use bots or u
 ### Inspector
 
 ```sh
-uv run jev-inspect          # open http://127.0.0.1:8766 on the monitor the agent is NOT confined to
+uv run laya-inspect          # open http://127.0.0.1:8766 on the monitor the agent is NOT confined to
 ```
 
 The inspector is the jev-ultrafast demo page for the desktop: the confined monitor with numbered
@@ -160,7 +160,7 @@ or an index when that differs from the physical layout.
 ### Browser-use modes
 
 ```sh
-uv run jev-modes            # open http://127.0.0.1:8767
+uv run laya-modes            # open http://127.0.0.1:8767
 ```
 
 A second, separate page (own port, own static files) that drives Chrome in one of three modes:
@@ -175,7 +175,7 @@ Step through with **Choose next / Execute choice**, or **Run automatically** (a 
 
 Read [docs/design.md](docs/design.md) for the freshness guards and the differences from the browser version.
 
-## How the Jev layer works (`jev_voice/brain.py`)
+## How the Jev layer works (`laya_voice/brain.py`)
 
 One request per utterance with ~15 speculative questions evaluated in parallel:
 
@@ -190,7 +190,7 @@ One request per utterance with ~15 speculative questions evaluated in parallel:
 
 Code reads only the answers the chosen action needs. Plan confidence is the
 minimum over the judgements used. Below `ACTION_MIN_CONFIDENCE` (0.35) it says
-"not sure" instead of acting. Thresholds live in `jev_voice/config.py`.
+"not sure" instead of acting. Thresholds live in `laya_voice/config.py`.
 
 ## Latency (Mac mini M4, measured)
 
@@ -219,7 +219,7 @@ instant).
 ## Layout
 
 ```
-jev_voice/
+laya_voice/
   main.py     loop, CLI, compound handling, task hand-off
   brain.py    Jev questions, candidate extraction, Plan (single commands)
   agent.py    multi-step loop: observe → choose → act (port of jev-ultrafast/agent.py)

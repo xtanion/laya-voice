@@ -1,12 +1,12 @@
 """Jev Voice: speak to your Mac.
 
-    uv run jev-voice                     # hands-free: say "Alfred, ..." (or tap Caps Lock, then speak)
-    uv run jev-voice --hold              # Caps Lock: hold to talk (tap = toggle), no wake word
-    uv run jev-voice --always-on         # open mic, every utterance is a command (no wake word)
-    uv run jev-voice --ptt               # press Enter to talk, Enter to stop
-    uv run jev-voice --text "open chrome and go to youtube"      # no mic
-    uv run jev-voice --text "..." --dry-run                        # plan only
-    uv run jev-voice --goal "reply to the last email from Sam saying yes"   # multi-step agent, no mic
+    uv run laya-voice                     # hands-free: say "Alfred, ..." (or tap Caps Lock, then speak)
+    uv run laya-voice --hold              # Caps Lock: hold to talk (tap = toggle), no wake word
+    uv run laya-voice --always-on         # open mic, every utterance is a command (no wake word)
+    uv run laya-voice --ptt               # press Enter to talk, Enter to stop
+    uv run laya-voice --text "open chrome and go to youtube"      # no mic
+    uv run laya-voice --text "..." --dry-run                        # plan only
+    uv run laya-voice --goal "reply to the last email from Sam saying yes"   # multi-step agent, no mic
 """
 from __future__ import annotations
 
@@ -553,7 +553,7 @@ def run_voice(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(prog="jev-voice", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(prog="laya-voice", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--text", help="run one command from text instead of the microphone")
     p.add_argument("--goal", help="run one multi-step goal with the desktop agent instead of the microphone")
     p.add_argument("--dry-run", action="store_true", help="plan with Jev but do not touch the computer")

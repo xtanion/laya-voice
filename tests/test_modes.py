@@ -1,4 +1,4 @@
-"""Offline contracts for the browser-use modes page (jev-modes). No browser, no paid APIs."""
+"""Offline contracts for the browser-use modes page (laya-modes). No browser, no paid APIs."""
 
 import os
 
@@ -6,7 +6,7 @@ import pytest
 from jev_ultrafast import agent as uf_agent
 from jev_ultrafast import model as uf_model
 
-from jev_voice import modes
+from laya_voice import modes
 
 
 def test_stock_and_voice_patches_are_distinct():

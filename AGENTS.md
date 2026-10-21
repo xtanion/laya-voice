@@ -1,4 +1,4 @@
-# Jev Voice
+# Laya Voice
 
 Read README.md and docs/design.md before editing. Two paths share one executor vocabulary:
 

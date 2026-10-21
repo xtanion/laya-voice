@@ -7,9 +7,9 @@ from unittest.mock import Mock
 
 import pytest
 
-from jev_voice import agent as loop
-from jev_voice import policy
-from jev_voice.desktop import StaleScreen, fingerprint
+from laya_voice import agent as loop
+from laya_voice import policy
+from laya_voice.desktop import StaleScreen, fingerprint
 
 
 def screen():
@@ -342,7 +342,7 @@ def test_unsettled_screen_still_allows_benign_scroll_after_streak(runner):
 
 
 def test_executor_rejects_a_stale_screen_before_input(monkeypatch):
-    from jev_voice import desktop
+    from laya_voice import desktop
 
     d = desktop.Desktop.__new__(desktop.Desktop)
     d.fresh = Mock(return_value=False)
@@ -353,7 +353,7 @@ def test_executor_rejects_a_stale_screen_before_input(monkeypatch):
 
 
 def test_force_is_limited_to_scroll_and_wait():
-    from jev_voice import desktop
+    from laya_voice import desktop
 
     d = desktop.Desktop.__new__(desktop.Desktop)
     d.fresh = Mock(return_value=True)
@@ -396,7 +396,7 @@ def test_confident_blocked_stops_immediately(runner):
 
 
 def test_run_costs_charge_jev_input_only_and_text_when_priced(monkeypatch):
-    from jev_voice import costs
+    from laya_voice import costs
 
     monkeypatch.setattr(costs, "JEV_PRICE_IN", 0.042)
     monkeypatch.setattr(costs, "JEV_PRICE_OUT", 0.0)
@@ -452,7 +452,7 @@ def test_repeated_rejection_of_one_choice_stops_the_run(runner, monkeypatch):
 
 
 def test_recommendation_refuses_listings_that_do_not_match_the_goal():
-    from jev_voice import recommend as rc
+    from laya_voice import recommend as rc
 
     goal = "On Facebook Marketplace vehicles, set Make to Mercedes-Benz, Model to CLA, minimum year 2020 and maximum price $15,000."
     assert rc.must_match(goal) == {"make": "Mercedes-Benz", "model": "CLA"}
@@ -468,7 +468,7 @@ def test_recommendation_refuses_listings_that_do_not_match_the_goal():
 
 
 def test_goal_max_year_and_price_are_enforced():
-    from jev_voice import recommend as rc
+    from laya_voice import recommend as rc
 
     goal = "type 'Mercedes-Benz CLA' into Search Marketplace, set the Year maximum to 2020 and the Price maximum to 15000"
     older = {"title": "2018 Mercedes-Benz cla", "text": "", "year": 2018, "price": 14000, "km": None, "href": "a"}
@@ -478,7 +478,7 @@ def test_goal_max_year_and_price_are_enforced():
 
 
 def test_chess_position_replays_figurine_moves_and_detects_turn():
-    from jev_voice import chess_play as c
+    from laya_voice import chess_play as c
 
     snap = {"sans": ["e4", "e5", "Nf3", "Nc6"], "moves": "1. e4 e5 2. f3 c6", "pieces": [], "flipped": False, "rect": {"x": 0, "y": 0, "w": 800, "h": 800}}
     board = c.position(snap)
