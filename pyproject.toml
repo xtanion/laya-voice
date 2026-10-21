@@ -19,6 +19,9 @@ dependencies = [
     "soundfile>=0.14.0",
 ]
 
+[project.optional-dependencies]
+laya = ["laya>=0.4.12"]
+
 [project.scripts]
 laya-voice = "laya_voice.main:main"
 laya-agent = "laya_voice.agent:main"

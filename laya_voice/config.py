@@ -22,6 +22,11 @@ _load_dotenv()
 
 DECISION_PROVIDER = os.environ.get("DECISION_PROVIDER", "jev")
 
+LAYA_REPO = os.environ.get("LAYA_REPO", "convaiinnovations/laya")
+LAYA_SUBFOLDER = os.environ.get("LAYA_SUBFOLDER", "")
+LAYA_DEVICE = os.environ.get("LAYA_DEVICE", "")
+LAYA_MAX_APPS = int(os.environ.get("LAYA_MAX_APPS", "8"))
+
 TYPESAFE_API_KEY = os.environ.get("TYPESAFE_API_KEY", "")
 TYPESAFE_URL = os.environ.get("TYPESAFE_URL", "https://api.typesafe.ai/v1/systemone")
 JEV_MODEL = os.environ.get("JEV_MODEL", "jev-latest")

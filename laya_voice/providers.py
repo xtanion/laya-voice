@@ -13,6 +13,7 @@ instead of reaching the executor.
 from __future__ import annotations
 
 import math
+import os
 from typing import Any, Protocol
 
 import httpx
@@ -27,6 +28,7 @@ class ProviderError(RuntimeError):
 class DecisionProvider(Protocol):
     name: str
     model: str
+    staged: bool
 
     def answer(self, state: dict[str, Any], questions: dict[str, Any]) -> dict[str, Any]: ...
 
@@ -70,6 +72,7 @@ class JevProvider:
     """TypeSafe System One (hosted). One request per utterance."""
 
     name = "jev"
+    staged = False
 
     def __init__(self, api_key: str | None = None, model: str | None = None, url: str | None = None,
                  http: httpx.Client | None = None) -> None:
@@ -100,7 +103,42 @@ class JevProvider:
             raise ProviderError(f"jev: {e}") from e
 
 
-PROVIDERS = {"jev": JevProvider}
+class LayaProvider:
+    """Laya (local, open weights), loaded in-process.
+
+    Laya is accurate only on a small state and a few questions per call, so Brain
+    asks it in two stages (`staged`): the action first, then only that action's
+    questions.
+    """
+
+    name = "laya"
+    staged = True
+
+    def __init__(self, repo: str | None = None, subfolder: str | None = None, agent: Any = None) -> None:
+        self.repo = repo or config.LAYA_REPO
+        self.subfolder = subfolder if subfolder is not None else config.LAYA_SUBFOLDER
+        self.model = self.repo + (f"/{self.subfolder}" if self.subfolder else "")
+        if agent is None:
+            # TensorFlow installs can deadlock Laya's model construction.
+            os.environ.setdefault("USE_TF", "0")
+            try:
+                import laya
+            except ImportError:
+                raise SystemExit("laya is not installed: uv sync --extra laya") from None
+            kw: dict[str, Any] = {"subfolder": self.subfolder} if self.subfolder else {}
+            if config.LAYA_DEVICE:
+                kw["device"] = config.LAYA_DEVICE
+            agent = laya.load(self.repo, **kw)
+        self.agent = agent
+
+    def answer(self, state: dict[str, Any], questions: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return self.agent.predict(state, questions)["answers"]
+        except Exception as e:  # noqa: BLE001
+            raise ProviderError(f"laya: {e}") from e
+
+
+PROVIDERS = {"jev": JevProvider, "laya": LayaProvider}
 
 
 def make_provider(name: str | None = None) -> DecisionProvider:

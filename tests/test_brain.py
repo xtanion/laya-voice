@@ -1,14 +1,15 @@
 """Offline contracts for the single-command decision path. No paid APIs, no macOS calls."""
 
 import json
+import os
 from unittest.mock import Mock
 
 import httpx
 import pytest
 
 from laya_voice import actions, brain, config, main, providers
-from laya_voice.brain import Brain
-from laya_voice.providers import JevProvider, ProviderError, validate_answers
+from laya_voice.brain import STAGE_QUESTIONS, Brain, shortlist_apps
+from laya_voice.providers import JevProvider, LayaProvider, ProviderError, validate_answers
 
 APPS = ["Google Chrome", "Notes", "Spotify"]
 
@@ -17,7 +18,8 @@ class FakeProvider:
     name = "fake"
     model = "fake-1"
 
-    def __init__(self, picks=None, conf=0.9, raw=None, exc=None, mutate=None):
+    def __init__(self, picks=None, conf=0.9, raw=None, exc=None, mutate=None, staged=False):
+        self.staged = staged
         self.picks = picks or {}
         self.mutate = mutate
         self.conf = conf
@@ -195,3 +197,149 @@ def test_make_provider_selects_registered(monkeypatch):
     monkeypatch.setitem(providers.PROVIDERS, "fake", FakeProvider)
     assert isinstance(providers.make_provider("FAKE"), FakeProvider)
     assert isinstance(brain.Brain(providers.make_provider("fake")).provider, FakeProvider)
+
+
+def staged_plan(utterance, picks):
+    prov = FakeProvider(picks=picks, staged=True)
+    return Brain(prov).evaluate(utterance), prov
+
+
+def test_staged_asks_action_first_then_only_its_questions():
+    p, prov = staged_plan("pause the music", {"action": "media", "media_op": "play_pause"})
+    (s1, q1), (s2, q2) = prov.calls
+    assert list(q1) == ["action"]
+    assert set(q2) == {"media_op", "compound", "addressed"}
+    assert s1 == s2 == {"utterance": "pause the music"}
+    assert (p.action, p.args["op"], p.error) == ("media", "play_pause", None)
+
+
+@pytest.mark.parametrize("action", sorted(STAGE_QUESTIONS))
+def test_staged_plans_build_for_every_action(action):
+    p, prov = staged_plan("do the thing", {"action": action, "app": "Notes", "site": "other", "text": "c0"})
+    assert p.error is None
+    assert len(prov.calls) == 2
+
+
+@pytest.mark.parametrize("action", ["none", "stop", "screenshot"])
+def test_staged_actions_without_args_ask_only_gates(action):
+    p, prov = staged_plan("hmm", {"action": action})
+    assert set(prov.calls[1][1]) == {"compound", "addressed"}
+    assert p.action == action
+
+
+def test_staged_in_app_reads_app():
+    p, _ = staged_plan("new note in the notes app", {"action": "new_item", "new_kind": "item", "in_app": 0.9, "app": "Notes"})
+    assert p.args["in_app"] == "Notes"
+
+
+def test_staged_website_fallback_to_search_has_its_answers():
+    p, _ = staged_plan("go to", {"action": "open_website", "site": "other", "engine": "google", "text": "c0"})
+    assert p.action == "web_search"
+    assert p.args["engine"] == "google"
+
+
+def test_staged_shortlists_apps(monkeypatch):
+    monkeypatch.setattr(actions, "installed_apps", lambda: [f"App {i}" for i in range(50)] + ["Spotify"])
+    monkeypatch.setattr(config, "LAYA_MAX_APPS", 4)
+    _, prov = staged_plan("open spotify", {"action": "open_app", "app": "Spotify"})
+    crit = prov.calls[1][1]["app"]["criteria"]
+    assert "Spotify" in crit and "none" in crit
+    assert len(crit) == 5
+
+
+def test_staged_second_round_error_fails_closed():
+    prov = FakeProvider(picks={"action": "media"}, staged=True)
+    real = FakeProvider.answer
+
+    def answer(state, questions):
+        if "action" not in questions:
+            raise ProviderError("round two")
+        return real(prov, state, questions)
+
+    prov.answer = answer
+    p = Brain(prov).evaluate("pause")
+    assert (p.action, p.error) == ("none", "round two")
+
+
+@pytest.mark.parametrize("utterance,app", [
+    ("open spotify", "Spotify"),
+    ("switch to chrome", "Google Chrome"),
+    ("open system settings", "System Settings"),
+    ("new note in the notes app", "Notes"),
+])
+def test_shortlist_apps_keeps_the_named_app(utterance, app):
+    apps = ["Calculator", "Google Chrome", "Mail", "Notes", "Photos", "Safari", "Spotify", "System Settings", "Terminal", "Xcode"]
+    assert app in shortlist_apps(utterance, apps, 3)
+
+
+def test_shortlist_apps_respects_k_and_empty_utterance():
+    apps = ["A", "B", "C"]
+    assert shortlist_apps("", apps, 2) == ["A", "B"]
+
+
+class FakeLaya:
+    def __init__(self, answers=None, exc=None):
+        self.answers, self.exc, self.calls = answers, exc, []
+
+    def predict(self, state, questions):
+        self.calls.append((state, questions))
+        if self.exc:
+            raise self.exc
+        return {"answers": self.answers, "routing": {"model": "english"}}
+
+
+def test_laya_provider_returns_answers_and_is_staged():
+    agent = FakeLaya({"action": {"choice": "none", "confidence": 0.8}})
+    prov = LayaProvider(agent=agent)
+    assert prov.staged is True
+    assert prov.model == config.LAYA_REPO + (f"/{config.LAYA_SUBFOLDER}" if config.LAYA_SUBFOLDER else "")
+    assert prov.answer({"utterance": "x"}, {"action": {}}) == {"action": {"choice": "none", "confidence": 0.8}}
+    assert agent.calls == [({"utterance": "x"}, {"action": {}})]
+
+
+def test_laya_provider_names_subfolder():
+    assert LayaProvider(subfolder="typed-decisions", agent=FakeLaya()).model.endswith("/typed-decisions")
+
+
+def test_laya_provider_errors_raise_provider_error():
+    agent = FakeLaya(exc=RuntimeError("mps oom"))
+    with pytest.raises(ProviderError, match="laya: mps oom"):
+        LayaProvider(agent=agent).answer({}, {})
+
+
+def test_laya_provider_missing_answers_raises_provider_error():
+    agent = Mock(predict=Mock(return_value={"routing": {}}))
+    with pytest.raises(ProviderError, match="laya"):
+        LayaProvider(agent=agent).answer({}, {})
+
+
+def test_laya_provider_missing_package(monkeypatch):
+    import builtins
+    real = builtins.__import__
+
+    def fake_import(name, *a, **kw):
+        if name == "laya":
+            raise ImportError(name)
+        return real(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    with pytest.raises(SystemExit, match="uv sync --extra laya"):
+        LayaProvider()
+
+
+@pytest.mark.skipif(not os.environ.get("LAYA_LIVE"), reason="set LAYA_LIVE=1 to load the real Laya checkpoint")
+@pytest.mark.parametrize("utterance,action", [
+    ("pause the music", "media"),
+    ("turn the volume up", "volume"),
+    ("type hello world and hit enter", "type_text"),
+    ("what time is dinner tonight", "none"),
+])
+def test_laya_live(utterance, action, laya_provider):
+    p = Brain(laya_provider).evaluate(utterance)
+    assert p.error is None
+    assert p.action == action
+
+
+@pytest.fixture(scope="module")
+def laya_provider():
+    return LayaProvider()

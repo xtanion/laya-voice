@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from typing import Any
 
 from . import actions, config
@@ -141,6 +142,41 @@ def domain_guess(utterance: str) -> str | None:
         if word and word not in ("it", "that", "this"):
             return word if "." in word else f"{word}.com"
     return None
+
+
+_WORDS = re.compile(r"[a-z0-9]+")
+
+
+def shortlist_apps(utterance: str, apps: list[str], k: int) -> list[str]:
+    """The k installed apps whose names best match some 1-3 word span of the utterance."""
+    words = _WORDS.findall(utterance.lower())
+    grams = {" ".join(words[i:i + n]) for n in (1, 2, 3) for i in range(len(words) - n + 1)}
+
+    def score(app: str) -> float:
+        name = app.lower()
+        parts = [name, *_WORDS.findall(name)]
+        return max((SequenceMatcher(None, g, p).ratio() for g in grams for p in parts), default=0.0)
+
+    return sorted(apps, key=score, reverse=True)[:k]
+
+
+# Staged providers answer the action first, then only what _to_plan reads for it.
+_ALWAYS = ("compound", "addressed")
+_IN_APP = ("in_app", "app")
+STAGE_QUESTIONS: dict[str, tuple[str, ...]] = {
+    "open_app": ("app",),
+    "open_website": ("site", "engine", "text"),
+    "web_search": ("engine", "text"),
+    "type_text": ("text", "submit", *_IN_APP),
+    "new_item": ("new_kind", "has_title", "text", *_IN_APP),
+    "shortcut": ("shortcut", *_IN_APP),
+    "scroll": ("scroll_dir", "scroll_amount", *_IN_APP),
+    "volume": ("volume_op",),
+    "media": ("media_op",),
+    "open_folder": ("folder",),
+    "system": ("system_op",),
+    "task": ("site", "recommend", "message_seller"),
+}
 
 
 @dataclass
@@ -278,23 +314,35 @@ class Brain:
     # ------------------------------------------------------------ inference
 
     def evaluate(self, utterance: str, front: str | None = None) -> Plan:
+        staged = getattr(self.provider, "staged", False)
         apps = actions.installed_apps()
+        if staged:
+            apps = shortlist_apps(utterance, apps, config.LAYA_MAX_APPS)
         cands = text_candidates(utterance)
-        state = {
-            "utterance": utterance,
-            "frontmost_app": front if front is not None else actions.frontmost_app(),
-            "apps": apps,
-            "candidates": cands,
-        }
         questions = self._questions(cands, apps)
         t0 = time.perf_counter()
         try:
-            ans = validate_answers(questions, self.provider.answer(state, questions))
+            if staged:
+                state: dict[str, Any] = {"utterance": utterance}
+                ans = self._ask(state, questions, ["action"])
+                ans.update(self._ask(state, questions, [*STAGE_QUESTIONS.get(ans["action"]["choice"], ()), *_ALWAYS]))
+            else:
+                state = {
+                    "utterance": utterance,
+                    "frontmost_app": front if front is not None else actions.frontmost_app(),
+                    "apps": apps,
+                    "candidates": cands,
+                }
+                ans = self._ask(state, questions, list(questions))
         except ProviderError as e:
             ms = int((time.perf_counter() - t0) * 1000)
             return Plan(utterance, "none", 0.0, latency_ms=ms, error=str(e))
         ms = int((time.perf_counter() - t0) * 1000)
         return self._to_plan(utterance, ans, cands, ms)
+
+    def _ask(self, state: dict[str, Any], questions: dict[str, Any], keys: list[str]) -> dict[str, Any]:
+        qs = {k: questions[k] for k in dict.fromkeys(keys)}
+        return validate_answers(qs, self.provider.answer(state, qs))
 
     def _to_plan(self, utterance: str, ans: dict[str, Any], cands: dict[str, str], ms: int) -> Plan:
         act = ans["action"]
@@ -305,6 +353,9 @@ class Brain:
         def ch(key: str) -> tuple[str, float]:
             a = ans[key]
             return a["choice"], float(a["confidence"])
+
+        def noul(key: str) -> float:
+            return float(ans.get(key, {}).get("noul", 0.0))
 
         if action == "open_app":
             app, c = ch("app")
@@ -332,11 +383,11 @@ class Brain:
         elif action == "type_text":
             tkey, c = ch("text")
             args["text"] = cands.get(tkey, utterance)
-            args["submit"] = float(ans["submit"]["noul"]) > config.YES
+            args["submit"] = noul("submit") > config.YES
             conf = min(conf, c)
         elif action == "new_item":
             args["kind"], _ = ch("new_kind")
-            if float(ans["has_title"]["noul"]) > config.YES:
+            if noul("has_title") > config.YES:
                 tkey, _ = ch("text")
                 args["title"] = cands.get(tkey, "")
         elif action == "shortcut":
@@ -366,14 +417,14 @@ class Brain:
             conf = min(conf, c)
 
         # "in the notes app": focus that app before acting inside it
-        if action in ("new_item", "shortcut", "type_text", "scroll") and float(ans["in_app"]["noul"]) > config.YES:
+        if action in ("new_item", "shortcut", "type_text", "scroll") and noul("in_app") > config.YES:
             app, _ = ch("app")
             if app != "none":
                 args["in_app"] = app
-        args["compound"] = float(ans["compound"]["noul"]) > config.YES
-        args["recommend"] = float(ans["recommend"]["noul"]) > config.YES
-        args["message_seller"] = float(ans["message_seller"]["noul"]) > config.YES
-        args["addressed"] = round(float(ans["addressed"]["noul"]), 2)
+        args["compound"] = noul("compound") > config.YES
+        args["recommend"] = noul("recommend") > config.YES
+        args["message_seller"] = noul("message_seller") > config.YES
+        args["addressed"] = round(noul("addressed"), 2)
         return Plan(utterance, action, conf, args, ans, ms)
 
 
