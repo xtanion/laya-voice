@@ -1,6 +1,6 @@
-"""Jev intent layer.
+"""Intent layer.
 
-One HTTP request per utterance: a speculative fan-out of every question the
+One provider request per utterance: a speculative fan-out of every question the
 executor could need. Jev never generates text; every free-text value (text to
 type, search query, domain) is produced as *candidates* in code and Jev selects
 the right one (docs: "select instead of generate").
@@ -12,9 +12,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-import httpx
-
 from . import actions, config
+from .providers import DecisionProvider, ProviderError, make_provider, validate_answers
 
 ACTIONS: dict[str, str] = {
     "open_app": "Launch, open, switch to, or bring up an application program on the Mac (for example Chrome, Cursor, Slack, Finder, Terminal, Notes)",
@@ -152,28 +151,22 @@ class Plan:
     args: dict[str, Any] = field(default_factory=dict)
     answers: dict[str, Any] = field(default_factory=dict)
     latency_ms: int = 0
+    error: str | None = None
 
     def __str__(self) -> str:
+        if self.error:
+            return f"rejected: {self.error}  {self.latency_ms}ms"
         a = ", ".join(f"{k}={v!r}" for k, v in self.args.items())
         return f"{self.action}({a})  conf={self.confidence:.2f}  {self.latency_ms}ms"
 
 
 class Brain:
-    def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
-        self.api_key = api_key or config.TYPESAFE_API_KEY
-        if not self.api_key:
-            raise SystemExit("TYPESAFE_API_KEY is not set (put it in .env)")
-        self.model = model or config.JEV_MODEL
-        self.http = httpx.Client(
-            timeout=15.0,
-            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-            http2=False,
-        )
-        # Keep the TCP+TLS connection warm so the first real command is fast.
-        try:
-            self.http.get("https://api.typesafe.ai/v1/models")
-        except Exception:
-            pass
+    def __init__(self, provider: DecisionProvider | None = None) -> None:
+        self.provider = provider or make_provider()
+
+    @property
+    def label(self) -> str:
+        return f"{self.provider.name} {self.provider.model}"
 
     # ------------------------------------------------------------ questions
 
@@ -293,13 +286,15 @@ class Brain:
             "apps": apps,
             "candidates": cands,
         }
-        payload = {"state": state, "model": self.model, "questions": self._questions(cands, apps)}
+        questions = self._questions(cands, apps)
         t0 = time.perf_counter()
-        r = self.http.post(config.TYPESAFE_URL, json=payload)
-        r.raise_for_status()
-        data = r.json()
+        try:
+            ans = validate_answers(questions, self.provider.answer(state, questions))
+        except ProviderError as e:
+            ms = int((time.perf_counter() - t0) * 1000)
+            return Plan(utterance, "none", 0.0, latency_ms=ms, error=str(e))
         ms = int((time.perf_counter() - t0) * 1000)
-        return self._to_plan(utterance, data["answers"], cands, ms)
+        return self._to_plan(utterance, ans, cands, ms)
 
     def _to_plan(self, utterance: str, ans: dict[str, Any], cands: dict[str, str], ms: int) -> Plan:
         act = ans["action"]

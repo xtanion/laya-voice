@@ -179,6 +179,11 @@ def handle(brain: Brain, speaker: Speaker, utterance: str, dry: bool, depth: int
     OVERLAY.set("thinking", f"{utterance}")
     plan = plan or brain.evaluate(utterance)
     print(f"  → {plan}")
+    if plan.error:
+        if not dry:
+            ding(SOUND_FAIL)
+        OVERLAY.set("error", "Decision failed", revert_after=3.0)
+        return True
     if plan.args.get("compound") and depth == 0:
         parts = split_compound(utterance)
         if len(parts) > 1:
@@ -364,7 +369,7 @@ def run_smart(s: Session) -> None:
     names = ", ".join(w.capitalize() for w in WAKE_WORDS[:2])
     print(f"🎙  Hands-free. Say \"{names.split(', ')[0]}, open chrome\"."
           + (" Or tap CAPS LOCK then speak." if caps else " (Caps Lock tap unavailable: no Accessibility/Input Monitoring.)")
-          + f"  (Jev {s.brain.model}, whisper base.en, voice {s.speaker.engine}:{s.speaker.voice})")
+          + f"  ({s.brain.label}, whisper base.en, voice {s.speaker.engine}:{s.speaker.voice})")
     if FEEDBACK == "voice":
         s.speaker.say(flavor("Ready."))
     else:
@@ -396,6 +401,10 @@ def run_smart(s: Session) -> None:
                 continue
             # No name: let Jev judge whether this is a command for the computer at all.
             gate = s.brain.evaluate(text)
+            if gate.error:
+                print(f"   ·  {text}   (ignored: {gate.error}, stt {stt_ms}ms)")
+                OVERLAY.set("error", "Decision failed", revert_after=3.0)
+                continue
             ok_cmd = (gate.args.get("addressed", 0) >= UNNAMED_MIN_ADDRESSED
                       and gate.confidence >= UNNAMED_MIN_CONFIDENCE)
             if ok_cmd and gate.action == "none":
@@ -485,7 +494,7 @@ def run_capslock(s: Session) -> None:
                 s.speaker.say("Permissions granted. Please restart me.")
                 sys.exit(3)
             perms = request_permissions()
-    print(f"⌨️  Hold CAPS LOCK and speak. Tap it to toggle hands-free. (Jev {s.brain.model}, whisper base.en, voice {s.speaker.engine}:{s.speaker.voice})")
+    print(f"⌨️  Hold CAPS LOCK and speak. Tap it to toggle hands-free. ({s.brain.label}, whisper base.en, voice {s.speaker.engine}:{s.speaker.voice})")
     s.speaker.say(flavor("Ready."))
     while True:
         pcm = done.get()
@@ -494,7 +503,7 @@ def run_capslock(s: Session) -> None:
 
 
 def run_always_on(s: Session) -> None:
-    print(f"🎙  Listening (Jev {s.brain.model}, whisper base.en). Say 'stop listening' to quit.")
+    print(f"🎙  Listening ({s.brain.label}, whisper base.en). Say 'stop listening' to quit.")
     s.speaker.say(flavor("Ready."))
     s.listener.pause(0.8)
     while True:
