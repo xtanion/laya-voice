@@ -1,6 +1,6 @@
 # Fine-tuning plan: Laya for laya-voice
 
-Status: step 0 done (2026-10-21); step 1 next. Baseline: commit `f85c219`, `data/eval` v1, threshold 0.35.
+Status: step 0 done; step 1 built, waiting on paraphrase generation (2026-10-21). Baseline: commit `f85c219`, `data/eval` v1, threshold 0.35.
 
 | | dev (62) | test (53, held out) |
 |---|---|---|
@@ -99,6 +99,13 @@ Separate from `data/eval`; never trained on dev or test. Target ~2-3k utterances
 - Open decision: Claude-generated paraphrases for diversity (offline, one-time data
   step, not runtime inference). Templates written by the same author as the eval set
   risk sharing its phrasing.
+
+**Step 1 status:** `laya_voice/training.py` (templates, row builder, dedupe) and
+`laya_voice/paraphrase.py` (77 seeds, ~2,000 phrasings requested from `claude-opus-5-5`,
+cached to `data/train/paraphrases.v1.jsonl`) are in place; see `data/train/README.md`.
+Templates alone: 653 rows / 2,216 items, 85 dropped as near-eval, 56 rows with no
+matching text candidate; `laya-train --dry-run` accepts all items (0 skipped) and plans
+128 optimizer updates over 4 epochs. ASR-noise generation is not built yet.
 
 ### 2. Dry run
 

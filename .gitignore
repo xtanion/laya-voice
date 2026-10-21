@@ -11,3 +11,4 @@ runs/
 models/kokoro/*.onnx
 models/kokoro/*.bin
 results/
+models/laya-voice-*/
