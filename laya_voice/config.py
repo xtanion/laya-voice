@@ -26,6 +26,7 @@ LAYA_REPO = os.environ.get("LAYA_REPO", "convaiinnovations/laya")
 LAYA_SUBFOLDER = os.environ.get("LAYA_SUBFOLDER", "")
 LAYA_DEVICE = os.environ.get("LAYA_DEVICE", "")
 LAYA_MAX_APPS = int(os.environ.get("LAYA_MAX_APPS", "8"))
+LAYA_BLOCKED = os.environ.get("LAYA_BLOCKED", "action.task,system_op.empty_trash")
 
 TYPESAFE_API_KEY = os.environ.get("TYPESAFE_API_KEY", "")
 TYPESAFE_URL = os.environ.get("TYPESAFE_URL", "https://api.typesafe.ai/v1/systemone")

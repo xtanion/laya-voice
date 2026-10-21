@@ -68,6 +68,20 @@ def validate_answers(questions: dict[str, Any], answers: Any) -> dict[str, Any]:
     return out
 
 
+def parse_blocked(spec: str) -> set[tuple[str, str]]:
+    """'action.task,system_op.empty_trash' -> {("action", "task"), ("system_op", "empty_trash")}"""
+    out = set()
+    for item in spec.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        key, sep, option = item.partition(".")
+        if not sep or not key or not option:
+            raise SystemExit(f"Bad blocked option {item!r}: use question.option, e.g. action.task")
+        out.add((key, option))
+    return out
+
+
 class JevProvider:
     """TypeSafe System One (hosted). One request per utterance."""
 
@@ -114,7 +128,9 @@ class LayaProvider:
     name = "laya"
     staged = True
 
-    def __init__(self, repo: str | None = None, subfolder: str | None = None, agent: Any = None) -> None:
+    def __init__(self, repo: str | None = None, subfolder: str | None = None, agent: Any = None,
+                 blocked: str | None = None) -> None:
+        self.blocked = parse_blocked(config.LAYA_BLOCKED if blocked is None else blocked)
         self.repo = repo or config.LAYA_REPO
         self.subfolder = subfolder if subfolder is not None else config.LAYA_SUBFOLDER
         self.model = self.repo + (f"/{self.subfolder}" if self.subfolder else "")

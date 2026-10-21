@@ -8,8 +8,8 @@ import httpx
 import pytest
 
 from laya_voice import actions, brain, config, main, providers
-from laya_voice.brain import STAGE_QUESTIONS, Brain, shortlist_apps
-from laya_voice.providers import JevProvider, LayaProvider, ProviderError, validate_answers
+from laya_voice.brain import SHORTCUT_CRITERIA, SHORTCUT_GROUPS, STAGE_QUESTIONS, Brain, block, shortlist_apps, stage_keys, text_candidates
+from laya_voice.providers import JevProvider, LayaProvider, ProviderError, parse_blocked, validate_answers
 
 APPS = ["Google Chrome", "Notes", "Spotify"]
 
@@ -199,8 +199,9 @@ def test_make_provider_selects_registered(monkeypatch):
     assert isinstance(brain.Brain(providers.make_provider("fake")).provider, FakeProvider)
 
 
-def staged_plan(utterance, picks):
+def staged_plan(utterance, picks, blocked=None):
     prov = FakeProvider(picks=picks, staged=True)
+    prov.blocked = blocked or set()
     return Brain(prov).evaluate(utterance), prov
 
 
@@ -208,7 +209,7 @@ def test_staged_asks_action_first_then_only_its_questions():
     p, prov = staged_plan("pause the music", {"action": "media", "media_op": "play_pause"})
     (s1, q1), (s2, q2) = prov.calls
     assert list(q1) == ["action"]
-    assert set(q2) == {"media_op", "compound", "addressed"}
+    assert set(q2) == {"media_op", "addressed"}
     assert s1 == s2 == {"utterance": "pause the music"}
     assert (p.action, p.args["op"], p.error) == ("media", "play_pause", None)
 
@@ -217,13 +218,13 @@ def test_staged_asks_action_first_then_only_its_questions():
 def test_staged_plans_build_for_every_action(action):
     p, prov = staged_plan("do the thing", {"action": action, "app": "Notes", "site": "other", "text": "c0"})
     assert p.error is None
-    assert len(prov.calls) == 2
+    assert len(prov.calls) == (3 if action == "shortcut" else 2)
 
 
 @pytest.mark.parametrize("action", ["none", "stop", "screenshot"])
 def test_staged_actions_without_args_ask_only_gates(action):
     p, prov = staged_plan("hmm", {"action": action})
-    assert set(prov.calls[1][1]) == {"compound", "addressed"}
+    assert set(prov.calls[1][1]) == {"addressed"}
     assert p.action == action
 
 
@@ -343,3 +344,97 @@ def test_laya_live(utterance, action, laya_provider):
 @pytest.fixture(scope="module")
 def laya_provider():
     return LayaProvider()
+
+
+def test_staged_shortcut_picks_group_then_key_within_it():
+    p, prov = staged_plan("go back", {"action": "shortcut", "shortcut_group": "browser", "shortcut": "browser_back"})
+    assert list(prov.calls[1][1]) == ["shortcut_group", "addressed"]
+    assert set(prov.calls[2][1]["shortcut"]["criteria"]) == set(SHORTCUT_GROUPS["browser"][1])
+    assert (p.action, p.args["shortcut"]) == ("shortcut", "browser_back")
+
+
+def test_staged_shortcut_outside_group_fails_closed():
+    p, _ = staged_plan("go back", {"action": "shortcut", "shortcut_group": "keys", "shortcut": "browser_back"})
+    assert p.action == "none"
+    assert "not offered" in p.error
+
+
+def test_staged_shortcut_confidence_includes_group():
+    prov = FakeProvider(picks={"action": "shortcut", "shortcut_group": "browser", "shortcut": "reload"}, staged=True,
+                        mutate=lambda a: a.get("shortcut_group", {}).update(confidence=0.3))
+    assert Brain(prov).evaluate("reload").confidence == pytest.approx(0.3)
+
+
+def test_shortcut_groups_partition_all_shortcuts():
+    keys = [k for _, ks in SHORTCUT_GROUPS.values() for k in ks]
+    assert len(keys) == len(set(keys))
+    assert set(keys) == set(SHORTCUT_CRITERIA)
+
+
+def test_unstaged_never_sees_staged_only_questions():
+    prov = FakeProvider(picks={"action": "shortcut", "shortcut": "reload"})
+    Brain(prov).evaluate("reload")
+    assert len(prov.calls) == 1
+    assert "shortcut_group" not in prov.calls[0][1]
+
+
+@pytest.mark.parametrize("utterance,asked", [
+    ("type hello", False),
+    ("type hello in notes", True),
+    ("new note into the notes app", True),
+])
+def test_in_app_asked_only_when_utterance_names_a_place(utterance, asked):
+    keys = stage_keys("type_text", utterance)
+    assert ("in_app" in keys) is asked
+    assert ("app" in keys) is asked
+
+
+def test_in_app_never_asked_for_actions_that_ignore_it():
+    assert "in_app" not in stage_keys("media", "pause the music in spotify")
+
+
+@pytest.mark.parametrize("utterance,asked", [("open chrome", False), ("open chrome and go to youtube", True), ("open notes then type hi", True)])
+def test_compound_asked_only_with_a_conjunction(utterance, asked):
+    assert ("compound" in stage_keys("open_app", utterance)) is asked
+
+
+def test_blocked_options_are_withdrawn_from_staged_questions():
+    _, prov = staged_plan("delete all my files", {"action": "none"}, blocked={("action", "task")})
+    assert "task" not in prov.calls[0][1]["action"]["criteria"]
+
+
+def test_blocked_option_selected_anyway_fails_closed():
+    p, _ = staged_plan("delete all my files", {"action": "task"}, blocked={("action", "task")})
+    assert p.action == "none"
+    assert "not offered" in p.error
+
+
+def test_block_ignores_unknown_pairs_and_keeps_input_intact():
+    qs = {"system_op": {"type": "choice", "criteria": {"lock": "x", "empty_trash": "y"}}}
+    out = block(qs, {("system_op", "empty_trash"), ("nope", "x"), ("system_op", "nope")})
+    assert set(out["system_op"]["criteria"]) == {"lock"}
+    assert set(qs["system_op"]["criteria"]) == {"lock", "empty_trash"}
+
+
+def test_parse_blocked():
+    assert parse_blocked(" action.task, system_op.empty_trash ,") == {("action", "task"), ("system_op", "empty_trash")}
+    assert parse_blocked("") == set()
+    with pytest.raises(SystemExit):
+        parse_blocked("task")
+
+
+def test_laya_provider_blocks_task_by_default():
+    assert ("action", "task") in LayaProvider(agent=FakeLaya()).blocked
+
+
+@pytest.mark.parametrize("utterance,cands", [
+    ("type hello world and hit enter", ["hello world"]),
+    ("search youtube for lofi hip hop", ["lofi hip hop"]),
+    ("search on amazon for usb c cable", ["usb c cable"]),
+    ("search for amazon prime deals", ["amazon prime deals"]),
+    ("google best ramen near me", ["best ramen near me"]),
+    ("make a new note called groceries", ["groceries"]),
+    ("hello how are you", ["hello how are you"]),
+])
+def test_text_candidates_drop_command_words(utterance, cands):
+    assert list(text_candidates(utterance).values()) == cands

@@ -79,6 +79,19 @@ SHORTCUT_CRITERIA: dict[str, str] = {
     "emoji_picker": "open the emoji picker",
 }
 
+# Staged providers pick a group first; one list of 44 is too long for them.
+SHORTCUT_GROUPS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "keys": ("press one plain key: enter, escape, tab, space, backspace, or an arrow key",
+             ("enter", "escape", "tab", "space", "backspace", "arrow_up", "arrow_down", "arrow_left", "arrow_right")),
+    "editing": ("edit text or a document: copy, paste, cut, undo, redo, select all, save, find, delete a word or line, bold, italic",
+                ("copy", "paste", "cut", "undo", "redo", "select_all", "save", "find", "delete_word", "delete_line", "bold", "italic")),
+    "browser": ("browser tabs and pages: new tab, close tab, reopen a closed tab, next or previous tab, go back, go forward, reload, address bar, zoom",
+                ("new_tab", "close_tab_or_window", "reopen_closed_tab", "next_tab", "previous_tab", "browser_back", "browser_forward",
+                 "reload", "address_bar", "zoom_in", "zoom_out")),
+    "app": ("apps and windows: create a new item, quit, minimize, hide, full screen, switch app or window, spotlight, send message, emoji picker",
+            ("new", "quit_app", "minimize_window", "hide_app", "fullscreen", "switch_app", "next_window", "spotlight", "send_message", "emoji_picker")),
+}
+
 # regexes that peel the payload text off a spoken command
 _TEXT_PATTERNS = [
     r"^(?:please\s+)?(?:can you\s+|could you\s+)?(?:type|write|enter|dictate|input|put|insert|say|send|text|paste)(?:\s+in|\s+out|\s+the\s+words?|\s+the\s+text|\s+this|\s+that)?[:,]?\s+(?P<t>.+)$",
@@ -90,6 +103,11 @@ _TITLE = re.compile(r"\b(?:called|titled|named|labeled|that says|saying|with the
 _TRAILING_IN_APP = re.compile(r"\s+(?:in|into|inside|on)\s+(?:the\s+)?(?:[A-Z][\w.]*|notes|chrome|cursor|safari|slack|mail|messages|terminal|finder)(?:\s+app)?\s*[.!?]?$")
 _TRAILING_SUBMIT = re.compile(
     r"[\s,.]*(?:and|then)?\s*(?:hit|press|and)\s+(?:enter|return|send|submit)\s*[.!]?$", re.I
+)
+# "search youtube for X" leaves "youtube for X" in the search pattern's span.
+_ENGINE_PREFIX = re.compile(
+    r"^(?:(?:on|in)\s+)?(?:" + "|".join(re.escape(e).replace("_", r"[\s_]?") for e in sorted(actions.SEARCH_ENGINES, key=len, reverse=True)) + r")\s+for\s+",
+    re.I,
 )
 _SPLIT_COMPOUND = re.compile(r"\s*(?:,\s*)?\b(?:and then|then|and also|and)\b\s*", re.I)
 
@@ -105,7 +123,7 @@ def text_candidates(utterance: str) -> dict[str, str]:
     cands: list[str] = []
 
     def add(t: str) -> None:
-        t = _clean(t)
+        t = _ENGINE_PREFIX.sub("", _clean(t))
         if t and t not in cands:
             cands.append(t)
 
@@ -117,11 +135,10 @@ def text_candidates(utterance: str) -> dict[str, str]:
         if m:
             add(m.group("t"))
             add(_TRAILING_IN_APP.sub("", m.group("t")))
-    whole = _clean(utterance)
-    if whole and whole not in cands:
-        cands.append(whole)
+    # The whole utterance only when no pattern cut a span: a selector given both
+    # tends to pick the longer string, command words included.
     if not cands:
-        cands.append(utterance.strip() or "(nothing)")
+        cands.append(_clean(utterance) or utterance.strip() or "(nothing)")
     return {f"c{i}": c for i, c in enumerate(cands[:6])}
 
 
@@ -161,22 +178,42 @@ def shortlist_apps(utterance: str, apps: list[str], k: int) -> list[str]:
 
 
 # Staged providers answer the action first, then only what _to_plan reads for it.
-_ALWAYS = ("compound", "addressed")
-_IN_APP = ("in_app", "app")
 STAGE_QUESTIONS: dict[str, tuple[str, ...]] = {
     "open_app": ("app",),
     "open_website": ("site", "engine", "text"),
     "web_search": ("engine", "text"),
-    "type_text": ("text", "submit", *_IN_APP),
-    "new_item": ("new_kind", "has_title", "text", *_IN_APP),
-    "shortcut": ("shortcut", *_IN_APP),
-    "scroll": ("scroll_dir", "scroll_amount", *_IN_APP),
+    "type_text": ("text", "submit"),
+    "new_item": ("new_kind", "has_title", "text"),
+    "shortcut": ("shortcut_group",),
+    "scroll": ("scroll_dir", "scroll_amount"),
     "volume": ("volume_op",),
     "media": ("media_op",),
     "open_folder": ("folder",),
     "system": ("system_op",),
     "task": ("site", "recommend", "message_seller"),
 }
+_IN_APP_ACTIONS = {"type_text", "new_item", "shortcut", "scroll"}
+_IN_APP_HINT = re.compile(r"\b(?:in|into|inside|on)\b", re.I)
+_STAGED_ONLY = {"shortcut_group"}
+
+
+def stage_keys(action: str, utterance: str) -> list[str]:
+    """Second-round questions. Code skips the ones the utterance cannot need."""
+    keys = [*STAGE_QUESTIONS.get(action, ()), "addressed"]
+    if action in _IN_APP_ACTIONS and _IN_APP_HINT.search(utterance):
+        keys += ["in_app", "app"]
+    if _SPLIT_COMPOUND.search(utterance):
+        keys.append("compound")
+    return keys
+
+
+def block(questions: dict[str, Any], blocked: set[tuple[str, str]]) -> dict[str, Any]:
+    """Withdraw (question, option) pairs so a provider cannot select them."""
+    out = dict(questions)
+    for key, option in blocked:
+        if key in out and option in out[key].get("criteria", {}):
+            out[key] = {**out[key], "criteria": {k: v for k, v in out[key]["criteria"].items() if k != option}}
+    return out
 
 
 @dataclass
@@ -278,6 +315,11 @@ class Brain:
                 "instructions": "Assume the user wants a key or keyboard shortcut pressed. Which one?",
                 "criteria": SHORTCUT_CRITERIA,
             },
+            "shortcut_group": {
+                "type": "choice",
+                "instructions": "Assume the user wants a key or keyboard shortcut pressed. What kind of key or shortcut?",
+                "criteria": {g: d for g, (d, _) in SHORTCUT_GROUPS.items()},
+            },
             "scroll_dir": {
                 "type": "choice",
                 "instructions": "Assume the user wants to scroll. In which direction?",
@@ -319,13 +361,19 @@ class Brain:
         if staged:
             apps = shortlist_apps(utterance, apps, config.LAYA_MAX_APPS)
         cands = text_candidates(utterance)
-        questions = self._questions(cands, apps)
+        questions = block(self._questions(cands, apps), getattr(self.provider, "blocked", set()))
         t0 = time.perf_counter()
         try:
             if staged:
                 state: dict[str, Any] = {"utterance": utterance}
                 ans = self._ask(state, questions, ["action"])
-                ans.update(self._ask(state, questions, [*STAGE_QUESTIONS.get(ans["action"]["choice"], ()), *_ALWAYS]))
+                action = ans["action"]["choice"]
+                ans.update(self._ask(state, questions, stage_keys(action, utterance)))
+                if action == "shortcut":
+                    group = SHORTCUT_GROUPS[ans["shortcut_group"]["choice"]][1]
+                    questions["shortcut"] = {**questions["shortcut"],
+                                             "criteria": {k: v for k, v in questions["shortcut"]["criteria"].items() if k in group}}
+                    ans.update(self._ask(state, questions, ["shortcut"]))
             else:
                 state = {
                     "utterance": utterance,
@@ -333,7 +381,7 @@ class Brain:
                     "apps": apps,
                     "candidates": cands,
                 }
-                ans = self._ask(state, questions, list(questions))
+                ans = self._ask(state, questions, [k for k in questions if k not in _STAGED_ONLY])
         except ProviderError as e:
             ms = int((time.perf_counter() - t0) * 1000)
             return Plan(utterance, "none", 0.0, latency_ms=ms, error=str(e))
@@ -394,6 +442,8 @@ class Brain:
             s, c = ch("shortcut")
             args["shortcut"] = s
             conf = min(conf, c)
+            if "shortcut_group" in ans:
+                conf = min(conf, ch("shortcut_group")[1])
         elif action == "scroll":
             d, c = ch("scroll_dir")
             a, _ = ch("scroll_amount")
