@@ -8,7 +8,21 @@ import httpx
 import pytest
 
 from laya_voice import actions, brain, config, main, providers
-from laya_voice.brain import SHORTCUT_CRITERIA, SHORTCUT_GROUPS, STAGE_QUESTIONS, Brain, block, shortlist_apps, stage_keys, text_candidates
+from laya_voice.brain import (
+    ACTIONS,
+    ACTIONS_SHORT,
+    QUESTIONS_VERSION,
+    SHORTCUT_CRITERIA,
+    SHORTCUT_GROUPS,
+    STAGE_QUESTIONS,
+    Brain,
+    block,
+    for_staged,
+    questions_fingerprint,
+    shortlist_apps,
+    stage_keys,
+    text_candidates,
+)
 from laya_voice.providers import JevProvider, LayaProvider, ProviderError, parse_blocked, validate_answers
 
 APPS = ["Google Chrome", "Notes", "Spotify"]
@@ -223,7 +237,7 @@ def test_staged_plans_build_for_every_action(action):
 
 @pytest.mark.parametrize("action", ["none", "stop", "screenshot"])
 def test_staged_actions_without_args_ask_only_gates(action):
-    p, prov = staged_plan("hmm", {"action": action})
+    p, prov = staged_plan("stop listening" if action == "stop" else "hmm", {"action": action})
     assert set(prov.calls[1][1]) == {"addressed"}
     assert p.action == action
 
@@ -438,3 +452,80 @@ def test_laya_provider_blocks_task_by_default():
 ])
 def test_text_candidates_drop_command_words(utterance, cands):
     assert list(text_candidates(utterance).values()) == cands
+
+
+def test_staged_action_uses_short_options_and_instruction():
+    _, prov = staged_plan("stop listening", {"action": "none"})
+    q = prov.calls[0][1]["action"]
+    assert q["criteria"] == ACTIONS_SHORT
+    assert len(q["instructions"]) < 120
+
+
+def test_short_actions_cover_every_action():
+    assert set(ACTIONS_SHORT) == set(ACTIONS)
+
+
+@pytest.mark.parametrize("utterance,offered", [
+    ("stop listening", True),
+    ("exit voice control", True),
+    ("quit listening", True),
+    ("go to sleep", True),
+    ("goodbye", True),
+    ("pause", False),
+    ("stop the song", False),
+    ("skip", False),
+    ("mute", False),
+    ("quit this app", False),
+])
+def test_stop_offered_only_for_stop_phrases(utterance, offered):
+    qs = for_staged(Brain.__new__(Brain)._questions({"c0": "x"}, []), utterance, set())
+    assert ("stop" in qs["action"]["criteria"]) is offered
+
+
+def test_stop_chosen_without_stop_phrase_fails_closed():
+    p, _ = staged_plan("stop the song", {"action": "stop"})
+    assert p.action == "none"
+    assert "not offered" in p.error
+
+
+def test_for_staged_keeps_configured_blocks():
+    qs = for_staged(Brain.__new__(Brain)._questions({"c0": "x"}, []), "stop listening", {("action", "task")})
+    assert "task" not in qs["action"]["criteria"]
+    assert "stop" in qs["action"]["criteria"]
+
+
+@pytest.mark.parametrize("utterance,asked", [
+    ("type buy milk", False),
+    ("type hello world and hit enter", True),
+    ("write see you tomorrow and press return", True),
+    ("type thanks and send it", True),
+])
+def test_submit_asked_only_when_utterance_mentions_it(utterance, asked):
+    assert ("submit" in stage_keys("type_text", utterance)) is asked
+
+
+def test_staged_type_text_without_submit_hint_does_not_submit():
+    p, prov = staged_plan("type buy milk", {"action": "type_text", "text": "c0"})
+    assert "submit" not in prov.calls[1][1]
+    assert p.args["submit"] is False
+
+
+def test_unstaged_keeps_full_action_options():
+    prov = FakeProvider(picks={"action": "none"})
+    Brain(prov).evaluate("pause")
+    assert prov.calls[0][1]["action"]["criteria"] == ACTIONS
+
+
+def test_low_confidence_stop_is_not_executed():
+    p = plan_for("stop listening", picks={"action": "stop"}, conf=0.2)
+    assert main.execute(p, dry=True) == "Not sure what you meant."
+    assert main.execute(plan_for("stop listening", picks={"action": "stop"}, conf=0.9), dry=True) == "__stop__"
+
+
+QUESTION_FINGERPRINTS = {1: "ed9da008fbc33d1f"}
+
+
+def test_question_text_is_pinned_to_its_version():
+    """Changing any staged question text needs QUESTIONS_VERSION bumped and a new entry here,
+    because fine-tuned checkpoints are trained on the exact strings."""
+    assert questions_fingerprint() == QUESTION_FINGERPRINTS[QUESTIONS_VERSION]

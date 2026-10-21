@@ -7,6 +7,8 @@ the right one (docs: "select instead of generate").
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import time
 from dataclasses import dataclass, field
@@ -33,6 +35,28 @@ ACTIONS: dict[str, str] = {
     "stop": "Tell the assistant to stop listening, go to sleep, or exit",
     "none": "Not a command for the computer: conversation, thinking aloud, background chatter, or unintelligible",
 }
+
+# Laya cuts every option to (192 - 16) / n tokens once all options exceed its head budget,
+# which left ACTIONS at ~11 tokens each. These fit whole (scripts/head_budget.py).
+ACTIONS_SHORT: dict[str, str] = {
+    "open_app": "open or switch to an application",
+    "open_website": "go to a website by name",
+    "web_search": "search the web or a site for something",
+    "type_text": "type or dictate some text",
+    "new_item": "create a new note, document, or file",
+    "shortcut": "press a key or shortcut: copy, undo, back",
+    "scroll": "scroll the page up or down",
+    "volume": "change or mute the sound volume",
+    "media": "play, pause, or skip music",
+    "screenshot": "take a screenshot",
+    "open_folder": "open a Finder folder",
+    "system": "lock screen, display sleep, dark mode",
+    "task": "multi-step task inside an app or site",
+    "stop": "stop listening or exit the assistant",
+    "none": "not a command: chatter or unclear",
+}
+
+ACTION_INSTRUCTIONS_SHORT = "`utterance` is a voice command to a Mac. Which kind of action does it ask the computer to do now?"
 
 SHORTCUT_CRITERIA: dict[str, str] = {
     "enter": "press enter / return / submit",
@@ -194,17 +218,43 @@ STAGE_QUESTIONS: dict[str, tuple[str, ...]] = {
 }
 _IN_APP_ACTIONS = {"type_text", "new_item", "shortcut", "scroll"}
 _IN_APP_HINT = re.compile(r"\b(?:in|into|inside|on)\b", re.I)
+_SUBMIT_HINT = re.compile(r"\b(?:enter|return|send|submit)\b", re.I)
+_STOP_HINT = re.compile(
+    r"\b(?:stop|quit|end|exit)\s+(?:listening|voice(?:\s+control)?|the\s+assistant)\b|\bgo\s+to\s+sleep\b|^(?:good\s*bye|bye|exit)\b", re.I)
 _STAGED_ONLY = {"shortcut_group"}
 
 
 def stage_keys(action: str, utterance: str) -> list[str]:
     """Second-round questions. Code skips the ones the utterance cannot need."""
     keys = [*STAGE_QUESTIONS.get(action, ()), "addressed"]
+    if action == "type_text" and not _SUBMIT_HINT.search(utterance):
+        keys.remove("submit")
     if action in _IN_APP_ACTIONS and _IN_APP_HINT.search(utterance):
         keys += ["in_app", "app"]
     if _SPLIT_COMPOUND.search(utterance):
         keys.append("compound")
     return keys
+
+
+def for_staged(questions: dict[str, Any], utterance: str, blocked: set[tuple[str, str]]) -> dict[str, Any]:
+    """Question set as a staged provider sees it: short action options, and `stop` offered
+    only when the utterance asks for it ('pause', 'skip', 'mute' were read as stop)."""
+    out = {**questions, "action": {**questions["action"], "criteria": ACTIONS_SHORT, "instructions": ACTION_INSTRUCTIONS_SHORT}}
+    if not _STOP_HINT.search(utterance):
+        blocked = blocked | {("action", "stop")}
+    return block(out, blocked)
+
+
+# Bump when any question text a staged provider sees changes: a fine-tuned checkpoint is
+# trained on these exact strings (tests/test_brain.py pins the fingerprint per version).
+QUESTIONS_VERSION = 1
+
+
+def questions_fingerprint() -> str:
+    qs = Brain.__new__(Brain)._questions({"c0": "candidate"}, ["App"])
+    payload = {"questions": for_staged(qs, "stop listening", set()), "stages": STAGE_QUESTIONS,
+               "shortcut_groups": SHORTCUT_GROUPS}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
 
 
 def block(questions: dict[str, Any], blocked: set[tuple[str, str]]) -> dict[str, Any]:
@@ -361,7 +411,9 @@ class Brain:
         if staged:
             apps = shortlist_apps(utterance, apps, config.LAYA_MAX_APPS)
         cands = text_candidates(utterance)
-        questions = block(self._questions(cands, apps), getattr(self.provider, "blocked", set()))
+        questions = self._questions(cands, apps)
+        blocked = getattr(self.provider, "blocked", set())
+        questions = for_staged(questions, utterance, blocked) if staged else block(questions, blocked)
         t0 = time.perf_counter()
         try:
             if staged:

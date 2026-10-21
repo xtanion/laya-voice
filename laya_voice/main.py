@@ -114,10 +114,10 @@ def execute(plan: Plan, dry: bool = False, speaker: Speaker | None = None) -> st
     act = plan.action
     if act == "none":
         return ""
-    if act == "stop":
-        return "__stop__"
     if plan.confidence < config.ACTION_MIN_CONFIDENCE:
         return "Not sure what you meant."
+    if act == "stop":
+        return "__stop__"
     if dry:
         return f"[dry] {plan}"
     if act == "task":

@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from . import actions, config
-from .brain import Brain, Plan
+from .brain import QUESTIONS_VERSION, Brain, Plan, questions_fingerprint
 from .providers import make_provider
 
 DATA = config.ROOT / "data" / "eval"
@@ -73,7 +73,7 @@ def fixed_context(ctx: dict[str, Any]) -> Iterator[None]:
 def executes(plan: Plan, threshold: float) -> bool:
     if plan.error or plan.action == "none":
         return False
-    return plan.action == "stop" or plan.confidence >= threshold
+    return plan.confidence >= threshold
 
 
 def _norm(v: Any) -> Any:
@@ -225,11 +225,12 @@ def main() -> None:
     brain = Brain(make_provider(args.provider))
     t0 = time.perf_counter()
     results = run(brain, cases, load_context())
-    print(f"{brain.label}: {len(cases)} cases in {time.perf_counter() - t0:.1f}s\n")
+    print(f"{brain.label}: {len(cases)} cases in {time.perf_counter() - t0:.1f}s  (questions v{QUESTIONS_VERSION} {questions_fingerprint()})\n")
     print(report(results, args.threshold, args.split, args.max_false_rate, args.show))
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
-        args.out.write_text(json.dumps({"provider": brain.label, "split": args.split, "metrics": score(results, args.threshold),
+        args.out.write_text(json.dumps({"provider": brain.label, "split": args.split, "questions_version": QUESTIONS_VERSION,
+                                        "questions_fingerprint": questions_fingerprint(), "metrics": score(results, args.threshold),
                                         "cases": [_row(r, args.threshold) for r in results]}, indent=2))
         print(f"\nwrote {args.out}")
 

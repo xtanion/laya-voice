@@ -84,7 +84,8 @@ MEDIA = {"action": "media", "op": "play_pause"}
     (plan(conf=0.5), 0.35, True),
     (plan(conf=0.2), 0.35, False),
     (plan("none", 1.0), 0.0, False),
-    (plan("stop", 0.0), 0.9, True),
+    (plan("stop", 0.2), 0.35, False),
+    (plan("stop", 0.9), 0.35, True),
     (plan(conf=1.0, error="boom"), 0.0, False),
 ])
 def test_executes_mirrors_main(p, threshold, runs):
@@ -151,7 +152,7 @@ def test_suggest_threshold_picks_lowest_within_budget():
 
 
 def test_suggest_threshold_none_when_unreachable():
-    rs = [Result(case({"reject": True}), plan("stop", 0.0))]
+    rs = [Result(case({"reject": True}), plan("system", 1.0, op="lock"))]
     assert suggest_threshold(rs, 0.0, [0.0, 0.5, 0.95]) is None
 
 
