@@ -10,3 +10,4 @@ recordings/
 runs/
 models/kokoro/*.onnx
 models/kokoro/*.bin
+results/

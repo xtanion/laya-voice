@@ -1,0 +1,10 @@
+{
+  "frontmost_app": "Google Chrome",
+  "apps": [
+    "1Password", "Activity Monitor", "App Store", "Arc", "Calculator", "Calendar", "Cursor", "Discord",
+    "Docker", "FaceTime", "Figma", "Finder", "Firefox", "Google Chrome", "iTerm", "Keynote", "Mail",
+    "Maps", "Messages", "Music", "Notes", "Notion", "Numbers", "Obsidian", "Pages", "Photos", "Postman",
+    "Preview", "QuickTime Player", "Reminders", "Safari", "Slack", "Spotify", "System Settings",
+    "Terminal", "TextEdit", "Visual Studio Code", "WhatsApp", "Xcode", "Zoom"
+  ]
+}

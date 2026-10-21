@@ -27,6 +27,7 @@ laya-voice = "laya_voice.main:main"
 laya-agent = "laya_voice.agent:main"
 laya-inspect = "laya_voice.inspector:main"
 laya-modes = "laya_voice.modes:main"
+laya-eval = "laya_voice.evaluate:main"
 
 [build-system]
 requires = ["hatchling"]
