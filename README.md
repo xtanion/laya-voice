@@ -2,28 +2,86 @@
 
 Talk to your Mac. You speak, it opens apps, types, searches, scrolls, presses keys.
 
-Everything runs locally except one ~250 ms call to **Jev** (TypeSafe's System One
-model), which turns the transcript into a typed action plus typed arguments in a
-single fan-out request. Jev never generates text; code produces candidate values
-and Jev *selects*. Code owns execution.
+A decision model turns the transcript into a typed action plus typed arguments. It
+never generates text: code produces candidate values and the model *selects*. Code
+owns execution. Two providers sit behind one interface (`DECISION_PROVIDER`):
+
+- **Laya** (local, what this fork targets): a fine-tuned [Laya](https://huggingface.co/convaiinnovations/laya)
+  checkpoint running in-process on MPS. Nothing leaves the machine.
+- **Jev** (hosted, TypeSafe's System One model): one ~250 ms fan-out request per utterance.
 
 ```
-mic ─► energy VAD ─► whisper.cpp (Metal, ~100 ms) ─► Jev (1 request, ~250 ms) ─► macOS actions ─► `say`
+mic ─► energy VAD ─► whisper.cpp small.en (Metal, ~330 ms) ─► Laya (local, ~200 ms) ─► macOS actions ─► chime / `say`
 ```
+
+## Performance
+
+Measured on a Mac mini M4 (16 GB), Laya on MPS, dev split of `data/eval` (62 labelled
+cases: 56 commands, 6 that must be rejected), threshold 0 (the runtime default).
+
+**Decision model, typed text**
+
+| Model | Command accuracy | Action accuracy | False actions | Latency p50 / p95 |
+| --- | --- | --- | --- | --- |
+| Laya base checkpoint (zero-shot, threshold 0.35) | 57.1% | | 12.9% | |
+| Laya fine-tuned pilot (`laya-voice-v1-pilot`) | **96.4%** | 100% | 4.8% | 195 / 324 ms |
+
+The 4.8% false actions are 3 of 62 cases: one should-reject request that ran and two
+commands executed with the wrong arguments. A 0.1 threshold keeps 96.4% accuracy with
+1.8% of commands held back.
+
+**End to end on speech** (`laya-eval --asr`): every case spoken by four macOS voices
+(Samantha, Daniel, Rishi, Karen), transcribed by whisper.cpp, decided by Laya.
+
+| Whisper | Prompt | Command accuracy | Action accuracy | False actions |
+| --- | --- | --- | --- | --- |
+| base.en | none | 85.7% | 92.9% | 7.7% |
+| base.en | `WHISPER_PROMPT` | 90.2% | 96.0% | 7.3% |
+| small.en | none | 87.9% | 92.9% | 8.1% |
+| small.en | `WHISPER_PROMPT` | 91.5% | 97.8% | 4.8% |
+| small.en + prompt, pilot at threshold 0 | `WHISPER_PROMPT` | **94.2%** | 97.8% | 6.9% |
+
+The first four rows use a 0.35 threshold; the last is the current runtime setting. Most
+remaining errors are keyboard shortcuts (40 of 48 right) and unsafe requests that should
+be refused (4 of 12 run). Synthetic voices only so far, not a real mic.
+
+**Latency per stage**
+
+| Stage | Time |
+| --- | --- |
+| End-of-speech detection | 550 ms of silence (tune `VADConfig.end_silence_ms`) |
+| whisper.cpp base.en / small.en (2.5 s clip, model loaded) | ~120 ms / ~330 ms |
+| Laya decision (staged: action, then that action's questions) | p50 195 ms, p95 324 ms |
+| Jev fan-out (hosted alternative) | 170–420 ms |
+| Front browser tab URL via Accessibility | 35–50 ms |
+| Execute + feedback | ~50–100 ms |
+
+Reproduce with `uv run laya-eval --provider laya` (add `--asr Samantha,Daniel,Rishi,Karen`
+for speech). The test split is held out until the final model.
 
 ## Setup (macOS, Apple Silicon)
 
 ```sh
-cp .env.example .env                       # add your TYPESAFE_API_KEY from console.typesafe.ai
+cp .env.example .env
 ./scripts/setup.sh
+uv sync --extra laya                       # local decision model
+curl -L -o models/ggml-small.en.bin \
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin
 ```
+
+In `.env`, set `DECISION_PROVIDER=laya`, `LAYA_REPO` to the fine-tuned checkpoint
+(a local path such as `models/laya-voice-v1-pilot`, or `convaiinnovations/laya` for
+the zero-shot base; the fine-tuned checkpoint is not published yet, train it with
+`docs/finetune-plan.md`) and `WHISPER_MODEL=models/ggml-small.en.bin`. For Jev instead, set
+`DECISION_PROVIDER=jev` and `TYPESAFE_API_KEY` from console.typesafe.ai. The whisper
+prompt is fixed in `laya_voice/config.py`.
 
 The script installs whisper-cpp + ffmpeg, downloads the model, syncs the Python
 env, remaps **Caps Lock → F18** with `hidutil` (persisted by a LaunchAgent so it
 survives reboots), installs a `laya` launcher in `~/.local/bin`, and opens the
 three permission panes. Grant the terminal app you launch from (Cursor / Terminal /
 iTerm) **Microphone**, **Accessibility** and **Input Monitoring**. If a permission
-is missing at launch, Jev Voice prompts for it and waits.
+is missing at launch, Laya Voice prompts for it and waits.
 
 Undo the Caps Lock remap any time: `./scripts/uninstall-capslock.sh`.
 
@@ -51,7 +109,7 @@ If the monitor prints `peak 0`, check the wiring or build with `-DMIC_RIGHT_CHAN
 
 **Hands-free mode (default):** the mic stays open and whisper transcribes every
 utterance locally (~100 ms, nothing leaves the machine). Only utterances that name
-the assistant (`WAKE_WORDS` in `.env`, default Alfred / Jarvis) go to Jev. After a
+the assistant (`WAKE_WORDS` in `.env`, default Alfred / Jarvis) are decided. After a
 command you have `FOLLOWUP_SECONDS` (8) to chain more without the name: "Alfred,
 open chrome" … "go to youtube" … "scroll down". Saying just "Alfred" chimes and
 arms the next utterance. A Caps Lock tap does the same.
@@ -64,21 +122,41 @@ longer toggles capitals while the remap is installed.
 
 | Say | Does |
 | --- | --- |
-| "open cursor", "switch to chrome" | `open -a` the matching installed app (Jev picks from the real app list) |
+| "open cursor", "switch to chrome" | `open -a` the matching installed app (the model picks from the real app list) |
 | "go to youtube", "go to stripe dot com" | opens the site |
 | "search youtube for lofi hip hop", "google best ramen near me" | site-specific search |
+| "open youtube and search veritasium" | one search on that site |
+| "search mrbeast" (with YouTube in front) | searches the site in the front tab, in the same tab |
+| "open the first video", "play the second one" | clicks that result on screen |
+| "click subscribe", "play the lofi mix" | clicks the on-screen element whose label matches |
 | "type hello world and hit enter" | types into the focused field, optional submit |
 | "close this tab", "select all and copy", "undo", "go back", "reload" | ~45 keyboard shortcuts |
 | "scroll down a lot", "go to the top" | real scroll-wheel events |
 | "volume up", "mute", "pause the music", "next song" | system volume / media keys |
 | "take a screenshot", "open my downloads", "lock the screen", "toggle dark mode" | misc |
-| "open notes and type buy milk and press enter" | compound: Jev flags it, code splits it, each step runs in order |
+| "open notes and type buy milk and press enter" | compound: the model flags it, code splits it, each step runs in order |
+
+### Browser awareness and voice clicks
+
+The front browser tab is read through Accessibility (`AXWebArea` → `AXURL`, 35–50 ms in
+Arc), so no Automation permission is needed. When you launch from a terminal or editor,
+the browser highest in the window stack is used. A search with no named site goes to the
+site in the front tab if it has search (YouTube stays YouTube), otherwise Google; when
+that site is already in front, the search URL is typed into the same tab.
+
+Utterances that ask to click, play, select or "open the first …" skip the model: code
+reads the on-screen elements and clicks the match directly. Position commands rank results
+that carry a duration by row, then column. Named targets match on shared words, with a
+fuzzy tie-break. A trailing "on youtube" is ignored when YouTube is the current site.
 
 ## Multi-step tasks: the ultrafast loop on the desktop
 
-Single commands above are one Jev call and one action. Anything that needs *looking at the
-screen* runs the agent loop from [jev-ultrafast](https://github.com/browser-use/jev-ultrafast),
-ported from the DOM to the macOS Accessibility tree:
+Single commands above are one decision and one action, and voice clicks go straight to
+the matched element. Typed goals that need several on-screen steps run the agent loop from
+[jev-ultrafast](https://github.com/browser-use/jev-ultrafast), ported from the DOM to the
+macOS Accessibility tree. With `DECISION_PROVIDER=laya` the desktop agent makes a staged
+Laya decision over shortlisted targets; the browser driver, recommendations, chess and the
+modes page below still use Jev.
 
 ```
 AX tree of the frontmost window ─► indexed element table ─► one Jev request ─► executor
@@ -186,9 +264,16 @@ Step through with **Choose next / Execute choice**, or **Run automatically** (a 
 
 Read [docs/design.md](docs/design.md) for the freshness guards and the differences from the browser version.
 
-## How the Jev layer works (`laya_voice/brain.py`)
+## How the decision layer works (`laya_voice/brain.py`, `laya_voice/providers.py`)
 
-One request per utterance with ~15 speculative questions evaluated in parallel:
+**Laya** asks in two stages, with only the utterance as state: first the `action`
+question, then only the questions that action needs. Shortlists keep option lists short
+(installed apps are cut to `LAYA_MAX_APPS` by name similarity), answers are validated
+fail-closed, and `LAYA_BLOCKED` options can never be selected. The fine-tuned checkpoint
+is trained on templates plus paraphrases built with the same question text as runtime
+(`QUESTIONS_VERSION` is frozen); see [docs/finetune-plan.md](docs/finetune-plan.md).
+
+**Jev** sends one request per utterance with ~15 speculative questions evaluated in parallel:
 
 - `action` — Choice over 13 action kinds.
 - `app` — Choice over your installed apps (+ `none`); `site`, `engine`, `folder`,
@@ -199,26 +284,21 @@ One request per utterance with ~15 speculative questions evaluated in parallel:
   is exactly the payload. This is the "select instead of generate" pattern.
 - `submit`, `compound` — Nouls.
 
+Both providers answer the same questions.
+
 Code reads only the answers the chosen action needs. Plan confidence is the
 minimum over the judgements used. Low-confidence plans still run (`ACTION_MIN_CONFIDENCE`
 defaults to 0), except disruptive ones (quit app, close tab, system actions, stop listening),
 which say "not sure" below `RISKY_MIN_CONFIDENCE` (0.35). Thresholds live in `laya_voice/config.py`.
 
-## Latency (Mac mini M4, measured)
-
-| Stage | Time |
-| --- | --- |
-| End-of-speech detection | 550 ms of silence (tune `VADConfig.end_silence_ms`) |
-| whisper.cpp base.en | 80–130 ms |
-| Jev fan-out | 170–420 ms |
-| Execute + `say` | ~50–100 ms |
-
 ## Floating transcription pill
 
 A small always-on-top bar at the top-center of the screen shows what whisper
-heard, what Jev decided, and the result (gray idle · red listening · yellow
-heard · blue thinking · green done · orange error). It never takes keyboard
-focus. `OVERLAY=0` or `--no-overlay` hides it.
+heard, what was decided, and the result (gray idle · red listening · yellow
+heard · blue thinking · green done · orange error). The idle text names the
+mode's trigger, and in hands-free mode "Listening" only shows once armed. It
+never takes keyboard focus. `OVERLAY=0` or `--no-overlay` hides it. Ctrl-C stops
+the service and its whisper-server.
 
 ## Feedback
 
@@ -233,7 +313,11 @@ instant).
 ```
 laya_voice/
   main.py     loop, CLI, compound handling, task hand-off
-  brain.py    Jev questions, candidate extraction, Plan (single commands)
+  brain.py    questions, candidate extraction, engine resolution, Plan (single commands)
+  providers.py decision providers: Jev (hosted) and Laya (local, staged)
+  evaluate.py laya-eval: labelled dev/test eval, threshold sweep, speech eval (--asr)
+  training.py training-data builder (templates + paraphrases); paraphrase.py generates them
+  remote.py   ESP32 voice module over Bluetooth LE
   agent.py    multi-step loop: observe → choose → act (port of jev-ultrafast/agent.py)
   desktop.py  AX-tree snapshot, indexed controls, freshness guards, execution (snapshot.js + browser.py)
   policy.py   dynamic operation/target heads, text helper (model.py)
@@ -255,6 +339,10 @@ laya_voice/
   persona.py  butler / cowboy phrasing
 scripts/
   setup.sh    one-shot install: deps, model, Caps Lock remap, launcher, permissions
+  hf_train.py fine-tune Laya on Hugging Face hardware
+data/
+  eval/       labelled commands (dev/test) and a fixed machine context
+  train/      v1 training set and paraphrases
 tests/
   test_agent.py  offline contracts for the agent loop (no screen, no paid APIs)
 ```
