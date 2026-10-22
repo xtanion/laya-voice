@@ -17,11 +17,11 @@
 #ifndef PIN_LED
 #define PIN_LED 2
 #endif
-// INMP441 with L/R tied to GND outputs on the left slot; set to 1 if the peak stays 0 with L/R on 3V3.
-#ifndef MIC_RIGHT_CHANNEL
-#define MIC_RIGHT_CHANNEL 0
-#endif
 // 24-bit samples arrive left-aligned in 32 bits; >>16 is unity, each step lower doubles the gain.
+// Print the mic level every 2 s while idle, to check wiring without the button.
+#ifndef MIC_MONITOR
+#define MIC_MONITOR 1
+#endif
 #ifndef GAIN_SHIFT
 #define GAIN_SHIFT 13
 #endif
@@ -31,7 +31,7 @@ static const char *SERVICE_UUID = "3e1c1517-cff3-47bc-bcb3-b0276cdbfdfd";
 static const char *AUDIO_UUID = "3e1c1518-cff3-47bc-bcb3-b0276cdbfdfd";
 
 static const int SAMPLE_RATE = 16000;
-static const int MAX_PACKET_SAMPLES = 320;
+static const int MAX_PACKET_SAMPLES = 476;
 static const uint16_t MIN_MTU = 100;
 static const uint32_t MAX_RECORD_MS = 14000;
 static const uint32_t DEBOUNCE_MS = 25;
@@ -57,6 +57,8 @@ static uint32_t recordStart = 0;
 static uint32_t samplesSent = 0;
 static uint16_t seq = 0;
 static int16_t peak = 0;
+static uint32_t packetsSent = 0;
+static uint32_t notifyRetries = 0;
 static int32_t adpcmPredictor = 0;
 static int adpcmIndex = 0;
 static int32_t raw[MAX_PACKET_SAMPLES];
@@ -66,9 +68,14 @@ static uint8_t packet[6 + MAX_PACKET_SAMPLES / 2];
 class ServerCb : public NimBLEServerCallbacks {
     void onConnect(NimBLEServer *s, NimBLEConnInfo &info) override {
         linked = true;
-        s->updateConnParams(info.getConnHandle(), 12, 24, 0, 400);
+        s->setDataLen(info.getConnHandle(), 251);
+        s->updateConnParams(info.getConnHandle(), 12, 12, 0, 400);
         NimBLEDevice::startSecurity(info.getConnHandle());
-        Serial.printf("connected: %s\n", info.getAddress().toString().c_str());
+        Serial.printf("connected: %s, interval %.1f ms\n", info.getAddress().toString().c_str(), info.getConnInterval() * 1.25f);
+    }
+    void onConnParamsUpdate(NimBLEConnInfo &info) override {
+        Serial.printf("conn params: interval %.1f ms, latency %u, timeout %u ms\n", info.getConnInterval() * 1.25f,
+                      info.getConnLatency(), info.getConnTimeout() * 10);
     }
     void onDisconnect(NimBLEServer *s, NimBLEConnInfo &info, int reason) override {
         linked = false;
@@ -77,7 +84,10 @@ class ServerCb : public NimBLEServerCallbacks {
         mtu = 23;
         Serial.printf("disconnected (reason %d)\n", reason);
     }
-    void onMTUChange(uint16_t m, NimBLEConnInfo &info) override { mtu = m; }
+    void onMTUChange(uint16_t m, NimBLEConnInfo &info) override {
+        mtu = m;
+        Serial.printf("mtu %u\n", m);
+    }
     void onAuthenticationComplete(NimBLEConnInfo &info) override {
         secure = info.isEncrypted();
         Serial.println(secure ? "link encrypted" : "pairing failed, disconnecting");
@@ -88,6 +98,7 @@ class ServerCb : public NimBLEServerCallbacks {
 class AudioCb : public NimBLECharacteristicCallbacks {
     void onSubscribe(NimBLECharacteristic *c, NimBLEConnInfo &info, uint16_t subValue) override {
         subscribed = subValue & 0x01;
+        Serial.printf("subscribed %d\n", (int)subscribed);
     }
 };
 
@@ -98,22 +109,22 @@ static int packetSamples() {
     return n > MAX_PACKET_SAMPLES ? MAX_PACKET_SAMPLES : n;
 }
 
-static void micBegin() {
+static void micBegin(int sck, int ws, bool right) {
     i2s_config_t cfg = {};
     cfg.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX);
     cfg.sample_rate = SAMPLE_RATE;
     cfg.bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT;
-    cfg.channel_format = MIC_RIGHT_CHANNEL ? I2S_CHANNEL_FMT_ONLY_RIGHT : I2S_CHANNEL_FMT_ONLY_LEFT;
+    cfg.channel_format = right ? I2S_CHANNEL_FMT_ONLY_RIGHT : I2S_CHANNEL_FMT_ONLY_LEFT;
     cfg.communication_format = I2S_COMM_FORMAT_STAND_I2S;
     cfg.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
-    cfg.dma_desc_num = 8;
+    cfg.dma_desc_num = 16;
     cfg.dma_frame_num = 256;
     cfg.use_apll = false;
 
     i2s_pin_config_t pins = {};
     pins.mck_io_num = I2S_PIN_NO_CHANGE;
-    pins.bck_io_num = PIN_MIC_SCK;
-    pins.ws_io_num = PIN_MIC_WS;
+    pins.bck_io_num = sck;
+    pins.ws_io_num = ws;
     pins.data_out_num = I2S_PIN_NO_CHANGE;
     pins.data_in_num = PIN_MIC_SD;
 
@@ -134,6 +145,42 @@ static size_t micRead(int samples, TickType_t wait) {
         if (a > peak) peak = a;
     }
     return n;
+}
+
+// Tries SCK/WS both ways round and both channel slots, keeps the one that yields data,
+// so a swapped clock pair or L/R strap does not leave the mic silent.
+static void micProbe() {
+    const int configs[4][3] = {
+        {PIN_MIC_SCK, PIN_MIC_WS, 0}, {PIN_MIC_SCK, PIN_MIC_WS, 1}, {PIN_MIC_WS, PIN_MIC_SCK, 0}, {PIN_MIC_WS, PIN_MIC_SCK, 1}};
+    int best = 0;
+    uint32_t bestNonzero = 0;
+    for (int c = 0; c < 4; c++) {
+        micBegin(configs[c][0], configs[c][1], configs[c][2]);
+        delay(150);
+        uint32_t nonzero = 0, total = 0;
+        int32_t maxAbs = 0;
+        while (total < 8000) {
+            size_t bytes = 0;
+            i2s_read(I2S_NUM_0, raw, sizeof(raw), &bytes, pdMS_TO_TICKS(100));
+            if (!bytes) break;
+            for (size_t i = 0; i < bytes / sizeof(int32_t); i++) {
+                int32_t v = raw[i] >> 8;
+                if (v) nonzero++;
+                if (abs(v) > maxAbs) maxAbs = abs(v);
+            }
+            total += bytes / sizeof(int32_t);
+        }
+        Serial.printf("mic probe sck=%d ws=%d %s: %lu/%lu nonzero, max %ld\n", configs[c][0], configs[c][1],
+                      configs[c][2] ? "right" : "left", (unsigned long)nonzero, (unsigned long)total, (long)maxAbs);
+        if (nonzero > bestNonzero) {
+            bestNonzero = nonzero;
+            best = c;
+        }
+        i2s_driver_uninstall(I2S_NUM_0);
+    }
+    micBegin(configs[best][0], configs[best][1], configs[best][2]);
+    if (bestNonzero == 0) Serial.println("mic probe: no data on any setup, check SD/VDD/GND wiring");
+    else Serial.printf("mic probe: using sck=%d ws=%d %s\n", configs[best][0], configs[best][1], configs[best][2] ? "right" : "left");
 }
 
 static void micFlush() {
@@ -174,10 +221,14 @@ static uint8_t adpcmEncode(int16_t sample) {
 }
 
 static bool notify(const uint8_t *buf, size_t len) {
-    for (int i = 0; i < 30; i++) {
+    for (int i = 0; i < 100; i++) {
         if (!ready()) return false;
-        if (audioChr->notify(buf, len)) return true;
-        delay(3);
+        if (audioChr->notify(buf, len)) {
+            packetsSent++;
+            return true;
+        }
+        notifyRetries++;
+        delay(5);
     }
     return false;
 }
@@ -218,7 +269,9 @@ static bool buttonDown() {
 
 static void finish(const char *why) {
     recording = false;
-    Serial.printf("%s: %lu ms, peak %d\n", why, (unsigned long)(samplesSent * 1000UL / SAMPLE_RATE), peak);
+    Serial.printf("%s: %lu ms audio in %lu ms, %lu packets, %lu retries, peak %d\n", why,
+                  (unsigned long)(samplesSent * 1000UL / SAMPLE_RATE), (unsigned long)(millis() - recordStart),
+                  (unsigned long)packetsSent, (unsigned long)notifyRetries, peak);
     if (peak == 0) Serial.println("peak is 0: check mic wiring or flip MIC_RIGHT_CHANNEL");
 }
 
@@ -237,7 +290,8 @@ void setup() {
     Serial.begin(115200);
     pinMode(PIN_BUTTON, INPUT_PULLUP);
     pinMode(PIN_LED, OUTPUT);
-    micBegin();
+    delay(500);
+    micProbe();
 
     NimBLEDevice::init(DEVICE_NAME);
     NimBLEDevice::setMTU(247);
@@ -268,6 +322,12 @@ void loop() {
     updateLed();
 
     bool down = buttonDown();
+    static bool wasDown = false;
+    if (down != wasDown) {
+        wasDown = down;
+        Serial.printf("button %s%s\n", down ? "down" : "up",
+                      down && !ready() ? (linked ? " (not ready: pairing/subscribe/mtu)" : " (not connected)") : "");
+    }
     if (!down) waitRelease = false;
 
     if (!recording) {
@@ -275,6 +335,8 @@ void loop() {
             micFlush();
             peak = 0;
             samplesSent = 0;
+            packetsSent = 0;
+            notifyRetries = 0;
             seq = 0;
             adpcmPredictor = 0;
             adpcmIndex = 0;
@@ -286,6 +348,14 @@ void loop() {
             }
         } else {
             micRead(MAX_PACKET_SAMPLES, pdMS_TO_TICKS(5));
+#if MIC_MONITOR
+            static uint32_t lastLevel = 0;
+            if (millis() - lastLevel >= 2000) {
+                lastLevel = millis();
+                Serial.printf("mic level: peak %d\n", peak);
+                peak = 0;
+            }
+#endif
         }
         return;
     }

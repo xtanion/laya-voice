@@ -134,6 +134,7 @@ class PacketStream:
             if seq != 0:
                 self._drop("bad start packet")
                 return
+            self._drop("no stop for the previous press")
             self.rec.start()
             self.seq = 0
             self.on_press()

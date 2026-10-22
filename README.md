@@ -105,7 +105,8 @@ VDD→3V3, GND→GND, L/R→GND, SCK→GPIO26, WS→GPIO25, SD→GPIO33; button 
 The module only streams over an encrypted link, so accept the pairing request on first
 connect; the terminal app needs the Bluetooth permission. Once connected, set
 `BLE_DEVICE` in `.env` to the printed address so no other device can stand in for it.
-If the monitor prints `peak 0`, check the wiring or build with `-DMIC_RIGHT_CHANNEL=1`.
+At boot the firmware probes SCK/WS both ways round and both L/R slots and keeps the one that yields data;
+if it prints `mic probe: no data on any setup`, check that the mic header is soldered and that SD, VDD and GND reach it.
 
 **Hands-free mode (default):** the mic stays open and whisper transcribes every
 utterance locally (~100 ms, nothing leaves the machine). Only utterances that name

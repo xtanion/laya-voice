@@ -259,7 +259,7 @@ def click_target(goal: str, labels: dict[str, str], where: str = "") -> str | No
     app or site ('play X on spotify' while `where` is YouTube), or no label sharing a word."""
     if not CLICK_GOAL.match(goal):
         return None
-    body = CLICK_GOAL.sub("", goal).strip()
+    body = CLICK_GOAL.sub("", goal).strip().rstrip(".!?,;:")
     tail = _ELSEWHERE.search(body)
     if tail and _names_place(tail.group(1)):
         if tail.group(1).strip().lower() not in where.lower():

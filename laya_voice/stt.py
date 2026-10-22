@@ -83,6 +83,6 @@ class WhisperServer:
         r = self.http.post(self.url + "/inference", files=files, data=data)
         r.raise_for_status()
         text = (r.json().get("text") or "").strip()
-        if text in _BLANK or text.lower() in _HALLUCINATIONS or len(text) < 2:
+        if text in _BLANK or text.lower() in _HALLUCINATIONS or len(text) < 2 or not any(c.isalnum() for c in text):
             return ""
         return text

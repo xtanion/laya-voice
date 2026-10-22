@@ -347,6 +347,9 @@ class Session:
     def process(self, pcm: np.ndarray) -> bool:
         """Transcribe + plan + execute. Returns False on 'stop'."""
         if len(pcm) < config.SAMPLE_RATE * 0.25:
+            if not self.listener:
+                print("  (too short, ignored)")
+                OVERLAY.idle()
             return True
         OVERLAY.set("heard", "Transcribing…")
         t0 = time.perf_counter()
@@ -586,13 +589,20 @@ def run_remote(s: Session) -> None:
     def on_press() -> None:
         s.speaker.interrupt()
         ding(SOUND_START)
+        print("  [module] recording")
         OVERLAY.set("listening", "Listening…")
 
     def on_audio(pcm: np.ndarray) -> None:
         ding(SOUND_STOP)
+        print(f"  [module] released ({len(pcm) / config.SAMPLE_RATE:.1f}s)")
         done.put(pcm)
 
-    ble = BleReceiver(on_press, on_audio, on_event=lambda m: print(f"  [module] {m}"))
+    def on_event(msg: str) -> None:
+        print(f"  [module] {msg}")
+        if "dropped" in msg:
+            OVERLAY.idle()
+
+    ble = BleReceiver(on_press, on_audio, on_event=on_event)
     ble.start()
     OVERLAY.idle("Hold the module button to talk")
     print(f"Looking for the voice module over Bluetooth. Hold its button and speak. ({s.brain.label}, whisper {config.WHISPER_MODEL.stem.removeprefix('ggml-')})")

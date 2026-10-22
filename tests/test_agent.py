@@ -653,3 +653,10 @@ def test_click_target_ignores_the_site_named_after_on(monkeypatch):
     labels = {"c": "Mrwhosetheboss YouTube · 2.3Cr+ followers", "v": "iPhone Duo Review - Messier Than You Think 20 minutes"}
     assert policy.click_target("play the iphone duo review on youtube", labels, "Arc - YouTube") == "v"
     assert policy.click_target("open the first link on youtube", labels, "Arc - YouTube") is None
+
+
+def test_click_target_ignores_whisper_punctuation_after_the_site(monkeypatch):
+    monkeypatch.setattr(policy, "_names_place", lambda text: text.strip().lower() == "youtube")
+    labels = {"p": "YouTube Premium home", "v": "iPhone Duo Review: First Generation Fun! 29 minutes"}
+    assert policy.click_target("Play Phil Collins on YouTube.", labels, "Arc - YouTube") is None
+    assert policy.click_target("Play the iPhone Duo review on YouTube.", labels, "Arc - YouTube") == "v"
