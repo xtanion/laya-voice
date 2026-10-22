@@ -20,6 +20,14 @@ def _load_dotenv() -> None:
 
 _load_dotenv()
 
+DECISION_PROVIDER = os.environ.get("DECISION_PROVIDER", "jev")
+
+LAYA_REPO = os.environ.get("LAYA_REPO", "convaiinnovations/laya")
+LAYA_SUBFOLDER = os.environ.get("LAYA_SUBFOLDER", "")
+LAYA_DEVICE = os.environ.get("LAYA_DEVICE", "")
+LAYA_MAX_APPS = int(os.environ.get("LAYA_MAX_APPS", "8"))
+LAYA_BLOCKED = os.environ.get("LAYA_BLOCKED", "action.task,system_op.empty_trash")
+
 TYPESAFE_API_KEY = os.environ.get("TYPESAFE_API_KEY", "")
 TYPESAFE_URL = os.environ.get("TYPESAFE_URL", "https://api.typesafe.ai/v1/systemone")
 JEV_MODEL = os.environ.get("JEV_MODEL", "jev-latest")
@@ -27,11 +35,19 @@ JEV_MODEL = os.environ.get("JEV_MODEL", "jev-latest")
 WHISPER_MODEL = Path(os.environ.get("WHISPER_MODEL", ROOT / "models" / "ggml-base.en.bin"))
 WHISPER_PORT = int(os.environ.get("WHISPER_PORT", "8178"))
 WHISPER_THREADS = int(os.environ.get("WHISPER_THREADS", "6"))
+WHISPER_PROMPT = ("Voice commands for a Mac: open, close, quit, skip, pause, play, mute, unmute, volume up, "
+                  "scroll down, copy, paste, undo, type, write, press enter, search YouTube, Google, Amazon, "
+                  "GitHub, Reddit, Slack, Spotify, Chrome.")
 
 SAMPLE_RATE = 16000
+
+BLE_DEVICE = os.environ.get("BLE_DEVICE", "")
+REMOTE_MAX_SECONDS = float(os.environ.get("REMOTE_MAX_SECONDS", "15"))
 TTS_VOICE = os.environ.get("TTS_VOICE", "Samantha")
 TTS_RATE = int(os.environ.get("TTS_RATE", "210"))
 
 # Confidence gates (tune on your own usage; see docs.typesafe.ai/confidence)
-ACTION_MIN_CONFIDENCE = float(os.environ.get("ACTION_MIN_CONFIDENCE", "0.35"))
+ACTION_MIN_CONFIDENCE = float(os.environ.get("ACTION_MIN_CONFIDENCE", "0"))
+# Disruptive actions (quitting an app, closing a tab, locking or sleeping) still need this much.
+RISKY_MIN_CONFIDENCE = float(os.environ.get("RISKY_MIN_CONFIDENCE", "0.35"))
 YES = 0.6

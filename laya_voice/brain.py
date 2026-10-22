@@ -1,20 +1,22 @@
-"""Jev intent layer.
+"""Intent layer.
 
-One HTTP request per utterance: a speculative fan-out of every question the
+One provider request per utterance: a speculative fan-out of every question the
 executor could need. Jev never generates text; every free-text value (text to
 type, search query, domain) is produced as *candidates* in code and Jev selects
 the right one (docs: "select instead of generate").
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import time
-from dataclasses import dataclass, field
-from typing import Any
-
-import httpx
+from dataclasses import dataclass, field, replace
+from difflib import SequenceMatcher
+from typing import Any, Callable
 
 from . import actions, config
+from .providers import DecisionProvider, ProviderError, make_provider, validate_answers
 
 ACTIONS: dict[str, str] = {
     "open_app": "Launch, open, switch to, or bring up an application program on the Mac (for example Chrome, Cursor, Slack, Finder, Terminal, Notes)",
@@ -33,6 +35,28 @@ ACTIONS: dict[str, str] = {
     "stop": "Tell the assistant to stop listening, go to sleep, or exit",
     "none": "Not a command for the computer: conversation, thinking aloud, background chatter, or unintelligible",
 }
+
+# Laya cuts every option to (192 - 16) / n tokens once all options exceed its head budget,
+# which left ACTIONS at ~11 tokens each. These fit whole (scripts/head_budget.py).
+ACTIONS_SHORT: dict[str, str] = {
+    "open_app": "open or switch to an application",
+    "open_website": "go to a website by name",
+    "web_search": "search the web or a site for something",
+    "type_text": "type or dictate some text",
+    "new_item": "create a new note, document, or file",
+    "shortcut": "press a key or shortcut: copy, undo, back",
+    "scroll": "scroll the page up or down",
+    "volume": "change or mute the sound volume",
+    "media": "play, pause, or skip music",
+    "screenshot": "take a screenshot",
+    "open_folder": "open a Finder folder",
+    "system": "lock screen, display sleep, dark mode",
+    "task": "multi-step task inside an app or site",
+    "stop": "stop listening or exit the assistant",
+    "none": "not a command: chatter or unclear",
+}
+
+ACTION_INSTRUCTIONS_SHORT = "`utterance` is a voice command to a Mac. Which kind of action does it ask the computer to do now?"
 
 SHORTCUT_CRITERIA: dict[str, str] = {
     "enter": "press enter / return / submit",
@@ -79,6 +103,19 @@ SHORTCUT_CRITERIA: dict[str, str] = {
     "emoji_picker": "open the emoji picker",
 }
 
+# Staged providers pick a group first; one list of 44 is too long for them.
+SHORTCUT_GROUPS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "keys": ("press one plain key: enter, escape, tab, space, backspace, or an arrow key",
+             ("enter", "escape", "tab", "space", "backspace", "arrow_up", "arrow_down", "arrow_left", "arrow_right")),
+    "editing": ("edit text or a document: copy, paste, cut, undo, redo, select all, save, find, delete a word or line, bold, italic",
+                ("copy", "paste", "cut", "undo", "redo", "select_all", "save", "find", "delete_word", "delete_line", "bold", "italic")),
+    "browser": ("browser tabs and pages: new tab, close tab, reopen a closed tab, next or previous tab, go back, go forward, reload, address bar, zoom",
+                ("new_tab", "close_tab_or_window", "reopen_closed_tab", "next_tab", "previous_tab", "browser_back", "browser_forward",
+                 "reload", "address_bar", "zoom_in", "zoom_out")),
+    "app": ("apps and windows: create a new item, quit, minimize, hide, full screen, switch app or window, spotlight, send message, emoji picker",
+            ("new", "quit_app", "minimize_window", "hide_app", "fullscreen", "switch_app", "next_window", "spotlight", "send_message", "emoji_picker")),
+}
+
 # regexes that peel the payload text off a spoken command
 _TEXT_PATTERNS = [
     r"^(?:please\s+)?(?:can you\s+|could you\s+)?(?:type|write|enter|dictate|input|put|insert|say|send|text|paste)(?:\s+in|\s+out|\s+the\s+words?|\s+the\s+text|\s+this|\s+that)?[:,]?\s+(?P<t>.+)$",
@@ -90,6 +127,11 @@ _TITLE = re.compile(r"\b(?:called|titled|named|labeled|that says|saying|with the
 _TRAILING_IN_APP = re.compile(r"\s+(?:in|into|inside|on)\s+(?:the\s+)?(?:[A-Z][\w.]*|notes|chrome|cursor|safari|slack|mail|messages|terminal|finder)(?:\s+app)?\s*[.!?]?$")
 _TRAILING_SUBMIT = re.compile(
     r"[\s,.]*(?:and|then)?\s*(?:hit|press|and)\s+(?:enter|return|send|submit)\s*[.!]?$", re.I
+)
+# "search youtube for X" leaves "youtube for X" in the search pattern's span.
+_ENGINE_PREFIX = re.compile(
+    r"^(?:(?:on|in)\s+)?(?:" + "|".join(re.escape(e).replace("_", r"[\s_]?") for e in sorted(actions.SEARCH_ENGINES, key=len, reverse=True)) + r")\s+for\s+",
+    re.I,
 )
 _SPLIT_COMPOUND = re.compile(r"\s*(?:,\s*)?\b(?:and then|then|and also|and)\b\s*", re.I)
 
@@ -105,7 +147,7 @@ def text_candidates(utterance: str) -> dict[str, str]:
     cands: list[str] = []
 
     def add(t: str) -> None:
-        t = _clean(t)
+        t = _ENGINE_PREFIX.sub("", _clean(t))
         if t and t not in cands:
             cands.append(t)
 
@@ -117,11 +159,10 @@ def text_candidates(utterance: str) -> dict[str, str]:
         if m:
             add(m.group("t"))
             add(_TRAILING_IN_APP.sub("", m.group("t")))
-    whole = _clean(utterance)
-    if whole and whole not in cands:
-        cands.append(whole)
+    # The whole utterance only when no pattern cut a span: a selector given both
+    # tends to pick the longer string, command words included.
     if not cands:
-        cands.append(utterance.strip() or "(nothing)")
+        cands.append(_clean(utterance) or utterance.strip() or "(nothing)")
     return {f"c{i}": c for i, c in enumerate(cands[:6])}
 
 
@@ -144,6 +185,87 @@ def domain_guess(utterance: str) -> str | None:
     return None
 
 
+_WORDS = re.compile(r"[a-z0-9]+")
+
+
+def shortlist_apps(utterance: str, apps: list[str], k: int) -> list[str]:
+    """The k installed apps whose names best match some 1-3 word span of the utterance."""
+    words = _WORDS.findall(utterance.lower())
+    grams = {" ".join(words[i:i + n]) for n in (1, 2, 3) for i in range(len(words) - n + 1)}
+
+    def score(app: str) -> float:
+        name = app.lower()
+        parts = [name, *_WORDS.findall(name)]
+        return max((SequenceMatcher(None, g, p).ratio() for g in grams for p in parts), default=0.0)
+
+    return sorted(apps, key=score, reverse=True)[:k]
+
+
+# Staged providers answer the action first, then only what _to_plan reads for it.
+STAGE_QUESTIONS: dict[str, tuple[str, ...]] = {
+    "open_app": ("app",),
+    "open_website": ("site", "engine", "text"),
+    "web_search": ("engine", "text"),
+    "type_text": ("text", "submit"),
+    "new_item": ("new_kind", "has_title", "text"),
+    "shortcut": ("shortcut_group",),
+    "scroll": ("scroll_dir", "scroll_amount"),
+    "volume": ("volume_op",),
+    "media": ("media_op",),
+    "open_folder": ("folder",),
+    "system": ("system_op",),
+    "task": ("site", "recommend", "message_seller"),
+}
+_IN_APP_ACTIONS = {"type_text", "new_item", "shortcut", "scroll"}
+_IN_APP_HINT = re.compile(r"\b(?:in|into|inside|on)\b", re.I)
+_SUBMIT_HINT = re.compile(r"\b(?:enter|return|send|submit)\b", re.I)
+_STOP_HINT = re.compile(
+    r"\b(?:stop|quit|end|exit)\s+(?:listening|voice(?:\s+control)?|the\s+assistant)\b|\bgo\s+to\s+sleep\b|^(?:good\s*bye|bye|exit)\b", re.I)
+_STAGED_ONLY = {"shortcut_group"}
+
+
+def stage_keys(action: str, utterance: str) -> list[str]:
+    """Second-round questions. Code skips the ones the utterance cannot need."""
+    keys = [*STAGE_QUESTIONS.get(action, ()), "addressed"]
+    if action == "type_text" and not _SUBMIT_HINT.search(utterance):
+        keys.remove("submit")
+    if action in _IN_APP_ACTIONS and _IN_APP_HINT.search(utterance):
+        keys += ["in_app", "app"]
+    if _SPLIT_COMPOUND.search(utterance):
+        keys.append("compound")
+    return keys
+
+
+def for_staged(questions: dict[str, Any], utterance: str, blocked: set[tuple[str, str]]) -> dict[str, Any]:
+    """Question set as a staged provider sees it: short action options, and `stop` offered
+    only when the utterance asks for it ('pause', 'skip', 'mute' were read as stop)."""
+    out = {**questions, "action": {**questions["action"], "criteria": ACTIONS_SHORT, "instructions": ACTION_INSTRUCTIONS_SHORT}}
+    if not _STOP_HINT.search(utterance):
+        blocked = blocked | {("action", "stop")}
+    return block(out, blocked)
+
+
+# Bump when any question text a staged provider sees changes: a fine-tuned checkpoint is
+# trained on these exact strings (tests/test_brain.py pins the fingerprint per version).
+QUESTIONS_VERSION = 1
+
+
+def questions_fingerprint() -> str:
+    qs = Brain.__new__(Brain)._questions({"c0": "candidate"}, ["App"])
+    payload = {"questions": for_staged(qs, "stop listening", set()), "stages": STAGE_QUESTIONS,
+               "shortcut_groups": SHORTCUT_GROUPS}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def block(questions: dict[str, Any], blocked: set[tuple[str, str]]) -> dict[str, Any]:
+    """Withdraw (question, option) pairs so a provider cannot select them."""
+    out = dict(questions)
+    for key, option in blocked:
+        if key in out and option in out[key].get("criteria", {}):
+            out[key] = {**out[key], "criteria": {k: v for k, v in out[key]["criteria"].items() if k != option}}
+    return out
+
+
 @dataclass
 class Plan:
     utterance: str
@@ -152,28 +274,22 @@ class Plan:
     args: dict[str, Any] = field(default_factory=dict)
     answers: dict[str, Any] = field(default_factory=dict)
     latency_ms: int = 0
+    error: str | None = None
 
     def __str__(self) -> str:
+        if self.error:
+            return f"rejected: {self.error}  {self.latency_ms}ms"
         a = ", ".join(f"{k}={v!r}" for k, v in self.args.items())
         return f"{self.action}({a})  conf={self.confidence:.2f}  {self.latency_ms}ms"
 
 
 class Brain:
-    def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
-        self.api_key = api_key or config.TYPESAFE_API_KEY
-        if not self.api_key:
-            raise SystemExit("TYPESAFE_API_KEY is not set (put it in .env)")
-        self.model = model or config.JEV_MODEL
-        self.http = httpx.Client(
-            timeout=15.0,
-            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-            http2=False,
-        )
-        # Keep the TCP+TLS connection warm so the first real command is fast.
-        try:
-            self.http.get("https://api.typesafe.ai/v1/models")
-        except Exception:
-            pass
+    def __init__(self, provider: DecisionProvider | None = None) -> None:
+        self.provider = provider or make_provider()
+
+    @property
+    def label(self) -> str:
+        return f"{self.provider.name} {self.provider.model}"
 
     # ------------------------------------------------------------ questions
 
@@ -249,6 +365,11 @@ class Brain:
                 "instructions": "Assume the user wants a key or keyboard shortcut pressed. Which one?",
                 "criteria": SHORTCUT_CRITERIA,
             },
+            "shortcut_group": {
+                "type": "choice",
+                "instructions": "Assume the user wants a key or keyboard shortcut pressed. What kind of key or shortcut?",
+                "criteria": {g: d for g, (d, _) in SHORTCUT_GROUPS.items()},
+            },
             "scroll_dir": {
                 "type": "choice",
                 "instructions": "Assume the user wants to scroll. In which direction?",
@@ -285,21 +406,43 @@ class Brain:
     # ------------------------------------------------------------ inference
 
     def evaluate(self, utterance: str, front: str | None = None) -> Plan:
+        staged = getattr(self.provider, "staged", False)
         apps = actions.installed_apps()
+        if staged:
+            apps = shortlist_apps(utterance, apps, config.LAYA_MAX_APPS)
         cands = text_candidates(utterance)
-        state = {
-            "utterance": utterance,
-            "frontmost_app": front if front is not None else actions.frontmost_app(),
-            "apps": apps,
-            "candidates": cands,
-        }
-        payload = {"state": state, "model": self.model, "questions": self._questions(cands, apps)}
+        questions = self._questions(cands, apps)
+        blocked = getattr(self.provider, "blocked", set())
+        questions = for_staged(questions, utterance, blocked) if staged else block(questions, blocked)
         t0 = time.perf_counter()
-        r = self.http.post(config.TYPESAFE_URL, json=payload)
-        r.raise_for_status()
-        data = r.json()
+        try:
+            if staged:
+                state: dict[str, Any] = {"utterance": utterance}
+                ans = self._ask(state, questions, ["action"])
+                action = ans["action"]["choice"]
+                ans.update(self._ask(state, questions, stage_keys(action, utterance)))
+                if action == "shortcut":
+                    group = SHORTCUT_GROUPS[ans["shortcut_group"]["choice"]][1]
+                    questions["shortcut"] = {**questions["shortcut"],
+                                             "criteria": {k: v for k, v in questions["shortcut"]["criteria"].items() if k in group}}
+                    ans.update(self._ask(state, questions, ["shortcut"]))
+            else:
+                state = {
+                    "utterance": utterance,
+                    "frontmost_app": front if front is not None else actions.frontmost_app(),
+                    "apps": apps,
+                    "candidates": cands,
+                }
+                ans = self._ask(state, questions, [k for k in questions if k not in _STAGED_ONLY])
+        except ProviderError as e:
+            ms = int((time.perf_counter() - t0) * 1000)
+            return Plan(utterance, "none", 0.0, latency_ms=ms, error=str(e))
         ms = int((time.perf_counter() - t0) * 1000)
-        return self._to_plan(utterance, data["answers"], cands, ms)
+        return self._to_plan(utterance, ans, cands, ms)
+
+    def _ask(self, state: dict[str, Any], questions: dict[str, Any], keys: list[str]) -> dict[str, Any]:
+        qs = {k: questions[k] for k in dict.fromkeys(keys)}
+        return validate_answers(qs, self.provider.answer(state, qs))
 
     def _to_plan(self, utterance: str, ans: dict[str, Any], cands: dict[str, str], ms: int) -> Plan:
         act = ans["action"]
@@ -310,6 +453,9 @@ class Brain:
         def ch(key: str) -> tuple[str, float]:
             a = ans[key]
             return a["choice"], float(a["confidence"])
+
+        def noul(key: str) -> float:
+            return float(ans.get(key, {}).get("noul", 0.0))
 
         if action == "open_app":
             app, c = ch("app")
@@ -337,17 +483,19 @@ class Brain:
         elif action == "type_text":
             tkey, c = ch("text")
             args["text"] = cands.get(tkey, utterance)
-            args["submit"] = float(ans["submit"]["noul"]) > config.YES
+            args["submit"] = noul("submit") > config.YES
             conf = min(conf, c)
         elif action == "new_item":
             args["kind"], _ = ch("new_kind")
-            if float(ans["has_title"]["noul"]) > config.YES:
+            if noul("has_title") > config.YES:
                 tkey, _ = ch("text")
                 args["title"] = cands.get(tkey, "")
         elif action == "shortcut":
             s, c = ch("shortcut")
             args["shortcut"] = s
             conf = min(conf, c)
+            if "shortcut_group" in ans:
+                conf = min(conf, ch("shortcut_group")[1])
         elif action == "scroll":
             d, c = ch("scroll_dir")
             a, _ = ch("scroll_amount")
@@ -371,18 +519,26 @@ class Brain:
             conf = min(conf, c)
 
         # "in the notes app": focus that app before acting inside it
-        if action in ("new_item", "shortcut", "type_text", "scroll") and float(ans["in_app"]["noul"]) > config.YES:
+        if action in ("new_item", "shortcut", "type_text", "scroll") and noul("in_app") > config.YES:
             app, _ = ch("app")
             if app != "none":
                 args["in_app"] = app
-        args["compound"] = float(ans["compound"]["noul"]) > config.YES
-        args["recommend"] = float(ans["recommend"]["noul"]) > config.YES
-        args["message_seller"] = float(ans["message_seller"]["noul"]) > config.YES
-        args["addressed"] = round(float(ans["addressed"]["noul"]), 2)
+        args["compound"] = noul("compound") > config.YES
+        args["recommend"] = noul("recommend") > config.YES
+        args["message_seller"] = noul("message_seller") > config.YES
+        args["addressed"] = round(noul("addressed"), 2)
         return Plan(utterance, action, conf, args, ans, ms)
 
 
 _SUBMIT_ONLY = re.compile(r"^(?:then\s+)?(?:hit|press|and)?\s*(?:enter|return|send|submit)(?:\s+it)?$", re.I)
+
+
+_FILLER = re.compile(r"^(?:(?:now|okay|ok|so|and|then|also|alright|hey|um|uh|please|can you|could you)\b[\s,.]*)+", re.I)
+
+
+def strip_filler(utterance: str) -> str:
+    """'Now search X' -> 'search X': leading fillers end up in the query otherwise."""
+    return _FILLER.sub("", utterance).strip() or utterance
 
 
 def split_compound(utterance: str) -> list[str]:
@@ -396,3 +552,77 @@ def split_compound(utterance: str) -> list[str]:
             return [utterance]
         parts[-1] = parts[-1] + " and hit enter"
     return parts
+
+
+_ENGINE_NAMES = {
+    "google_maps": r"google maps|maps",
+    "google": r"google(?! maps)",
+    "youtube": r"youtube|you tube",
+    "amazon": r"amazon",
+    "wikipedia": r"wikipedia|wiki",
+    "github": r"git ?hub",
+    "twitter_x": r"twitter|tweets?",
+    "reddit": r"reddit",
+    "spotify": r"spotify",
+    "perplexity": r"perplexity",
+}
+_ENGINE_HINTS = {
+    "youtube": r"videos?|watch|channel|music video",
+    "amazon": r"buy|order|shop|price",
+    "google_maps": r"directions|near me|nearby|route",
+}
+_ENGINE_RE = {k: re.compile(rf"\b(?:{v})\b", re.I) for k, v in _ENGINE_NAMES.items()}
+_HINT_RE = {k: re.compile(rf"\b(?:{v})\b", re.I) for k, v in _ENGINE_HINTS.items()}
+
+
+def named_engines(text: str) -> list[str]:
+    """Search engines the words name, in the order they are said."""
+    hits = [(m.start(), k) for k, rx in _ENGINE_RE.items() if (m := rx.search(text))]
+    return [k for _, k in sorted(hits)]
+
+
+def resolve_engine(plan: Plan, front_site: Callable[[], str | None]) -> Plan:
+    """Laya's engine for 'search X' is a guess when no engine is named (the pilot sent 'search
+    mrbeast' to perplexity). A named engine wins, then a pick the words hint at ('videos of X' on
+    youtube), then the site open in the front browser tab when it has a search, then google."""
+    if plan.action != "web_search" or plan.error:
+        return plan
+    engine = plan.args.get("engine")
+    named = named_engines(plan.utterance)
+    if engine in named or (not named and engine in _HINT_RE and _HINT_RE[engine].search(plan.utterance)):
+        return plan
+    if named:
+        engine = named[0]
+    else:
+        site = front_site()
+        engine = site if site in actions.SEARCH_ENGINES else "google"
+    return replace(plan, args={**plan.args, "engine": engine})
+
+
+def search_to_site(plan: Plan) -> Plan:
+    """'Search YouTube.' names a site, not a query: open it instead of searching it for 'YouTube'."""
+    engine = plan.args.get("engine")
+    if plan.action == "web_search" and engine in actions.SITES and engine in _ENGINE_RE \
+            and _ENGINE_RE[engine].fullmatch(plan.args.get("query", "").strip(" .!?")):
+        args = {k: v for k, v in plan.args.items() if k not in ("engine", "query")}
+        return replace(plan, action="open_website", args={**args, "url": actions.SITES[engine], "site": engine})
+    return plan
+
+
+def merge_site_searches(steps: list[tuple[str, Plan]]) -> list[tuple[str, Plan]]:
+    """'open youtube' then 'search veritasium' is one youtube search, not a home page plus a google search.
+
+    A search that names no engine takes the site the previous step opened, when that site has a
+    search engine."""
+    out: list[tuple[str, Plan]] = []
+    for part, plan in steps:
+        if out and plan.action == "web_search" and not plan.error:
+            prev_part, prev = out[-1]
+            site = prev.args.get("site")
+            if prev.action == "open_website" and not prev.error and site in actions.SEARCH_ENGINES and not named_engines(part):
+                merged = replace(plan, utterance=f"{prev_part} and {part}", args={**plan.args, "engine": site},
+                                 confidence=min(prev.confidence, plan.confidence))
+                out[-1] = (merged.utterance, merged)
+                continue
+        out.append((part, plan))
+    return out

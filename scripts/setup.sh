@@ -22,11 +22,11 @@ echo "▸ Caps Lock → F18 (hidutil), persisted with a LaunchAgent"
 MAPPING='{"UserKeyMapping":[{"HIDKeyboardModifierMappingSrc":0x700000039,"HIDKeyboardModifierMappingDst":0x70000006D}]}'
 hidutil property --set "$MAPPING" >/dev/null
 AGENTS="$HOME/Library/LaunchAgents"; mkdir -p "$AGENTS"
-cat > "$AGENTS/ai.jev.capslock.plist" <<PLIST
+cat > "$AGENTS/ai.laya.capslock.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>Label</key><string>ai.jev.capslock</string>
+  <key>Label</key><string>ai.laya.capslock</string>
   <key>ProgramArguments</key><array>
     <string>/usr/bin/hidutil</string><string>property</string><string>--set</string>
     <string>$MAPPING</string>
@@ -34,16 +34,16 @@ cat > "$AGENTS/ai.jev.capslock.plist" <<PLIST
   <key>RunAtLoad</key><true/>
 </dict></plist>
 PLIST
-launchctl bootout "gui/$(id -u)/ai.jev.capslock" 2>/dev/null || true
-launchctl bootstrap "gui/$(id -u)" "$AGENTS/ai.jev.capslock.plist"
+launchctl bootout "gui/$(id -u)/ai.laya.capslock" 2>/dev/null || true
+launchctl bootstrap "gui/$(id -u)" "$AGENTS/ai.laya.capslock.plist"
 
-echo "▸ 'jev' launcher in ~/.local/bin"
+echo "▸ 'laya' launcher in ~/.local/bin"
 mkdir -p "$HOME/.local/bin"
-cat > "$HOME/.local/bin/jev" <<LAUNCH
+cat > "$HOME/.local/bin/laya" <<LAUNCH
 #!/bin/zsh
-cd "$ROOT" && exec uv run jev-voice "\$@"
+cd "$ROOT" && exec uv run laya-voice "\$@"
 LAUNCH
-chmod +x "$HOME/.local/bin/jev"
+chmod +x "$HOME/.local/bin/laya"
 case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.zshrc";; esac
 
 echo "▸ Permissions (grant your terminal app: Cursor / Terminal / iTerm)"
@@ -54,6 +54,6 @@ sleep 1
 open "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
 
 echo
-echo "✔ Done. Restart your terminal, then run:  jev"
+echo "✔ Done. Restart your terminal, then run:  laya"
 echo "  Hold CAPS LOCK and speak. Tap CAPS LOCK to toggle hands-free."
-echo "  Undo the remap any time:  hidutil property --set '{\"UserKeyMapping\":[]}'  and remove ~/Library/LaunchAgents/ai.jev.capslock.plist"
+echo "  Undo the remap any time:  hidutil property --set '{\"UserKeyMapping\":[]}'  and remove ~/Library/LaunchAgents/ai.laya.capslock.plist"

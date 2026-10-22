@@ -736,7 +736,7 @@ textarea:focus-visible {
 
 .operation-choices{display:flex;flex-wrap:wrap;gap:6px;margin:14px 0}.operation-choice{font-size:10px;padding:5px 7px;border:1px solid #dbe2d4;border-radius:5px;color:#687260}.operation-choice.best{color:#185c3b;background:#eef6e5;border-color:#88ac79}
 
-/* ---- browser-use modes (jev-modes page) ---- */
+/* ---- browser-use modes (laya-modes page) ---- */
 .modes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 0 0 22px; }
 .mode { text-align: left; padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px; background: #fff; cursor: pointer; font: inherit; color: inherit; display: block; height: auto; }
 .mode:hover { border-color: #b8c4ad; }

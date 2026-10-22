@@ -1,6 +1,6 @@
 """Browser-use modes: one page, three ways to drive Chrome with Jev.
 
-    uv run jev-modes            # then open http://127.0.0.1:8767
+    uv run laya-modes            # then open http://127.0.0.1:8767
 
 ``ultrafast``  jev-ultrafast exactly as the repo shipped: the stock ``Agent`` on a plain CDP tab,
                Jev chooses, the OpenAI-compatible text helper writes TYPE_TEXT values, 60-step budget,
@@ -11,7 +11,7 @@
 ``agent``      The full agent: ``WebAgent`` with the planner, Jev → Haiku → Fable tie-breaks, the DONE
                verifier, learned site rules and per-site trust. Needs ``ANTHROPIC_API_KEY``.
 
-This server is separate from the inspector (``jev-inspect``): its own port, its own static page.
+This server is separate from the inspector (``laya-inspect``): its own port, its own static page.
 """
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ from jev_ultrafast import model as uf_model
 from jev_ultrafast import questions as uf_questions
 from jev_ultrafast.browser import StalePage
 
-# Stock jev-ultrafast behaviour, captured before jev_voice.web patches the module globals.
+# Stock jev-ultrafast behaviour, captured before laya_voice.web patches the module globals.
 STOCK = {"field_text": uf_model.field_text, "max_steps": uf_questions.MAX_STEPS, "next_action": uf_questions.NEXT_ACTION}
 
 from . import config, escalate  # noqa: E402  (config loads .env)
@@ -39,7 +39,7 @@ from .costs import run_costs  # noqa: E402
 from .desktop import display_bounds  # noqa: E402
 from .web import DEFAULT_URL, WebAgent  # noqa: E402
 
-# jev_voice.web's patches (text value resolution with Jev-select fallback, TASK_MAX_STEPS).
+# laya_voice.web's patches (text value resolution with Jev-select fallback, TASK_MAX_STEPS).
 VOICE = {"field_text": uf_agent.field_text, "max_steps": uf_agent.MAX_STEPS}
 
 ROOT = Path(__file__).parent

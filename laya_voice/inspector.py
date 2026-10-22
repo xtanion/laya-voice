@@ -1,6 +1,6 @@
 """Loopback-only inspector for the Jev desktop agent (port of jev-ultrafast/demo.py).
 
-    uv run jev-inspect            # then open http://127.0.0.1:8766
+    uv run laya-inspect            # then open http://127.0.0.1:8766
 
 Shows the monitor the agent is confined to with numbered element badges, the operation and
 target probabilities of every Jev request, the text-helper calls, and the decision trail.

@@ -502,7 +502,7 @@ $("download").addEventListener("click", () => {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = "jev-voice-trace.json";
+  a.download = "laya-voice-trace.json";
   a.click();
   URL.revokeObjectURL(url);
 });

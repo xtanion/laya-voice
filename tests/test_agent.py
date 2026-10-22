@@ -7,9 +7,14 @@ from unittest.mock import Mock
 
 import pytest
 
-from jev_voice import agent as loop
-from jev_voice import policy
-from jev_voice.desktop import StaleScreen, fingerprint
+from laya_voice import agent as loop
+from laya_voice import policy
+from laya_voice.desktop import StaleScreen, fingerprint
+
+
+@pytest.fixture(autouse=True)
+def jev_policy(monkeypatch):
+    monkeypatch.setattr(policy.config, "DECISION_PROVIDER", "jev")
 
 
 def screen():
@@ -342,7 +347,7 @@ def test_unsettled_screen_still_allows_benign_scroll_after_streak(runner):
 
 
 def test_executor_rejects_a_stale_screen_before_input(monkeypatch):
-    from jev_voice import desktop
+    from laya_voice import desktop
 
     d = desktop.Desktop.__new__(desktop.Desktop)
     d.fresh = Mock(return_value=False)
@@ -353,7 +358,7 @@ def test_executor_rejects_a_stale_screen_before_input(monkeypatch):
 
 
 def test_force_is_limited_to_scroll_and_wait():
-    from jev_voice import desktop
+    from laya_voice import desktop
 
     d = desktop.Desktop.__new__(desktop.Desktop)
     d.fresh = Mock(return_value=True)
@@ -396,7 +401,7 @@ def test_confident_blocked_stops_immediately(runner):
 
 
 def test_run_costs_charge_jev_input_only_and_text_when_priced(monkeypatch):
-    from jev_voice import costs
+    from laya_voice import costs
 
     monkeypatch.setattr(costs, "JEV_PRICE_IN", 0.042)
     monkeypatch.setattr(costs, "JEV_PRICE_OUT", 0.0)
@@ -452,7 +457,7 @@ def test_repeated_rejection_of_one_choice_stops_the_run(runner, monkeypatch):
 
 
 def test_recommendation_refuses_listings_that_do_not_match_the_goal():
-    from jev_voice import recommend as rc
+    from laya_voice import recommend as rc
 
     goal = "On Facebook Marketplace vehicles, set Make to Mercedes-Benz, Model to CLA, minimum year 2020 and maximum price $15,000."
     assert rc.must_match(goal) == {"make": "Mercedes-Benz", "model": "CLA"}
@@ -468,7 +473,7 @@ def test_recommendation_refuses_listings_that_do_not_match_the_goal():
 
 
 def test_goal_max_year_and_price_are_enforced():
-    from jev_voice import recommend as rc
+    from laya_voice import recommend as rc
 
     goal = "type 'Mercedes-Benz CLA' into Search Marketplace, set the Year maximum to 2020 and the Price maximum to 15000"
     older = {"title": "2018 Mercedes-Benz cla", "text": "", "year": 2018, "price": 14000, "km": None, "href": "a"}
@@ -478,7 +483,7 @@ def test_goal_max_year_and_price_are_enforced():
 
 
 def test_chess_position_replays_figurine_moves_and_detects_turn():
-    from jev_voice import chess_play as c
+    from laya_voice import chess_play as c
 
     snap = {"sans": ["e4", "e5", "Nf3", "Nc6"], "moves": "1. e4 e5 2. f3 c6", "pieces": [], "flipped": False, "rect": {"x": 0, "y": 0, "w": 800, "h": 800}}
     board = c.position(snap)
@@ -489,3 +494,162 @@ def test_chess_position_replays_figurine_moves_and_detects_turn():
     assert (round(x), round(y)) == (648, 670)
     xf, yf = c.square_center({"rect": {"x": 229, "y": 66, "w": 744, "h": 744}, "flipped": True}, c.chess.E2)
     assert (round(xf), round(yf)) == (554, 206)
+
+
+class Scripted:
+    """Staged Laya stand-in: answers each question from a script and records what it was asked."""
+
+    model = "laya-test"
+
+    def __init__(self, choices=None, nouls=None, conf=None):
+        self.choices, self.nouls, self.conf, self.calls = choices or {}, nouls or {}, conf or {}, []
+
+    def answer(self, state, questions):
+        self.calls.append((state, questions))
+        out = {}
+        for qid, q in questions.items():
+            if q["type"] == "noul":
+                out[qid] = {"noul": self.nouls.get(qid, 0.0)}
+            else:
+                ids = list(q["criteria"])
+                pick = self.choices.get(qid, ids[0])
+                pick = pick if pick in ids else ids[0]
+                out[qid] = {**choice(ids, pick), "confidence": self.conf.get(qid, 1.0)}
+        return out
+
+
+@pytest.fixture
+def staged(monkeypatch):
+    def use(**kw):
+        fake = Scripted(**kw)
+        monkeypatch.setattr(policy, "_provider", lambda: fake)
+        monkeypatch.setattr(policy.config, "DECISION_PROVIDER", "laya")
+        monkeypatch.setattr(policy, "post_json", Mock(side_effect=AssertionError("no TypeSafe call under laya")))
+        return fake
+    return use
+
+
+def test_staged_click_picks_from_a_short_list_with_small_state(staged):
+    fake = staged(nouls={"click": 0.9}, choices={"target": "3"})
+    d = policy.choose(screen(), "click go", [])
+    assert (d["operation"], d["choice"]) == ("CLICK", "e3")
+    first_state, first_questions = fake.calls[0]
+    assert set(first_state) == {"goal", "app", "window", "recent_actions", "matching_controls"}
+    assert "done" not in first_questions and "WAIT" not in first_questions["operation"]["criteria"]
+    assert all(len(q.get("criteria", {})) <= policy.STAGED_TARGETS for _, qs in fake.calls[1:] for q in qs.values())
+
+
+def test_staged_done_is_a_question_only_after_a_step(staged):
+    fake = staged(nouls={"done": 0.9, "click": 0.9})
+    d = policy.choose(screen(), "click go", [{"kind": "click", "action": "Click Go", "screen_changed": True}])
+    assert d["operation"] == "DONE" and d["choice"] == "DONE"
+    assert "WAIT" in fake.calls[0][1]["operation"]["criteria"]
+
+
+def test_staged_confident_non_click_step_wins(staged):
+    staged(nouls={"click": 0.9}, choices={"operation": "PRESS_KEY", "target": "enter"})
+    d = policy.choose(screen(), "press enter", [])
+    assert (d["operation"], d["choice"]) == ("PRESS_KEY", "key:enter")
+
+
+def test_staged_weak_click_match_falls_back_to_the_picked_step(staged):
+    staged(nouls={"click": 0.9}, choices={"operation": "PRESS_KEY", "target": "enter"},
+           conf={"operation": 0.3, "target": 0.2})
+    d = policy.choose(screen(), "submit it", [])
+    assert (d["operation"], d["choice"]) == ("PRESS_KEY", "key:enter")
+
+
+def test_staged_app_not_installed_is_blocked(staged):
+    staged(choices={"operation": "OPEN_APP"}, conf={"operation": 0.6, "target": 0.1})
+    d = policy.choose(screen(), "open spotify", [])
+    assert d["operation"] == "BLOCKED" and d["target"] is None
+
+
+def test_staged_type_text_selects_a_code_cut_candidate(staged):
+    staged(choices={"operation": "TYPE_TEXT", "target": "1"}, conf={"operation": 0.8})
+    d = policy.choose(screen(), "type hello world", [])
+    assert d["operation"] == "TYPE_TEXT" and d["choice"] == "e1"
+    assert d["selected_text"] == "hello world"
+
+
+SIDEBAR = {
+    "play": "Play (k)",
+    "air": "Phil Collins - In The Air Tonight (2016 Remaster) 5 minutes, 36 seconds Phil Collins",
+    "paradise": "Phil Collins - Another Day In Paradise [Audio HQ] HD 5 minutes, 23 seconds Phil Collins Music",
+    "wrecked": "Imagine Dragons - Wrecked (Official Music Video) 4 minutes, 37 seconds ImagineDragons",
+    "mix": "RÜFÜS DU SOL, Calvin Harris, Fred again.. | Sunset Lake Mix with Friends 49 minutes",
+    "share": "Share",
+}
+
+
+def test_shortlist_ignores_command_words_and_keeps_only_strong_matches():
+    assert policy.shortlist("play wrecked by imagine dragons", SIDEBAR) == ["wrecked"]
+    assert set(policy.shortlist("play the phil collins song", SIDEBAR)) == {"air", "paradise"}
+    assert policy.shortlist("play the rufus du sol mix", SIDEBAR)[0] == "mix"
+    assert policy.shortlist("click play", SIDEBAR)[0] == "play"
+
+
+def test_option_label_drops_durations_and_shows_the_part_the_user_said():
+    assert policy.option_label(SIDEBAR["wrecked"], limit=80) == "Imagine Dragons - Wrecked (Official Music Video) ImagineDragons"
+    shown = policy.option_label(SIDEBAR["mix"], "play the sunset lake mix", 50)
+    assert "Sunset Lake Mix" in shown and "RUFUS" not in shown
+    assert policy.option_label(SIDEBAR["mix"]).startswith("RUFUS DU SOL")
+
+
+CLICK_LABELS = {"1": "Subscribe", "2": "iPhone 17 Review: Worth it? 12 minutes", "3": "Music",
+                "4": "Despacito Luis Fonsi", "5": "Next (SHIFT+n)"}
+
+
+@pytest.mark.parametrize("goal,where,expected", [
+    ("click subscribe", "Arc", "1"),
+    ("click on subscribe", "Arc", "1"),
+    ("play iphone 17 review by mrwhosetheboss", "Arc", "2"),
+    ("play despacito on youtube", "Arc MKBHD - YouTube", "4"),
+    ("play the despacito video in the sidebar", "Arc", "4"),
+    ("play", "Arc", None),
+    ("play music", "Arc", None),
+    ("play despacito on spotify", "Arc MKBHD - YouTube", None),
+    ("open youtube", "Arc", None),
+    ("volume up", "Arc", None),
+    ("click the blue button", "Arc", None),
+])
+def test_click_target(monkeypatch, goal, where, expected):
+    monkeypatch.setattr(policy, "_names_place", lambda text: text.strip().lower() in {"spotify", "youtube"})
+    assert policy.click_target(goal, CLICK_LABELS, where) == expected
+
+
+def _video(i, label, x, y):
+    return {"id": f"v{i}", "kind": "click", "role": "link", "label": label, "rect": {"x": x, "y": y, "w": 300, "h": 40}}
+
+
+RESULTS = [
+    _video(1, "Subscribe", 900, 100) | {"role": "button"},
+    _video(2, "14 minutes, 30 seconds", 300, 200),
+    _video(3, "I Survived 100 Days 14 minutes, 30 seconds", 700, 205),
+    _video(4, "$1 vs $1,000,000 Hotel 21 minutes", 700, 505),
+    _video(5, "$1 vs $1,000,000 Hotel 21 minutes", 300, 500),
+    _video(6, "Shorts", 700, 650),
+    _video(7, "World's Largest Lego Tower 1 hour, 2 minutes", 700, 805),
+    _video(8, "4 Minutes 2 Seconds of 6 Minutes 32 Seconds", 400, 150) | {"role": "button"},
+]
+
+
+@pytest.mark.parametrize("goal,expected", [
+    ("open the first video", "v3"),
+    ("play the second video", "v5"),
+    ("click the third result", "v7"),
+    ("open first video", "v3"),
+    ("play the last video", "v7"),
+    ("open the fifth video", None),
+    ("open the first tab", None),
+    ("what is the first video", None),
+])
+def test_ordinal_target(goal, expected):
+    assert policy.ordinal_target(goal, RESULTS) == expected
+
+
+def test_click_target_ignores_the_site_named_after_on(monkeypatch):
+    monkeypatch.setattr(policy, "_names_place", lambda text: text.strip().lower() == "youtube")
+    labels = {"c": "Mrwhosetheboss YouTube · 2.3Cr+ followers", "v": "iPhone Duo Review - Messier Than You Think 20 minutes"}
+    assert policy.click_target("play the iphone duo review on youtube", labels, "Arc - YouTube") == "v"
+    assert policy.click_target("open the first link on youtube", labels, "Arc - YouTube") is None
