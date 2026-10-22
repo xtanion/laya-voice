@@ -63,6 +63,8 @@ class FakeProvider:
 def no_macos(monkeypatch):
     monkeypatch.setattr(actions, "installed_apps", lambda: list(APPS))
     monkeypatch.setattr(actions, "frontmost_app", lambda: "Spotify")
+    monkeypatch.setattr(actions, "front_site", lambda: None)
+    monkeypatch.setattr(main, "on_screen", lambda utterance: None)
 
 
 def plan_for(utterance, **kw):
@@ -105,10 +107,21 @@ def test_state_carries_utterance_apps_and_front():
     assert set(questions["app"]["criteria"]) == {*APPS, "none"}
 
 
-def test_low_confidence_is_not_executed():
+def test_low_confidence_still_executes(monkeypatch):
+    monkeypatch.setattr(config, "ACTION_MIN_CONFIDENCE", 0.0)
     p = plan_for("pause the music", picks={"action": "media", "media_op": "play_pause"}, conf=0.2)
     assert p.confidence == pytest.approx(0.2)
-    assert main.execute(p, dry=True) == "Not sure what you meant."
+    assert main.execute(p, dry=True).startswith("[dry] media(")
+
+
+@pytest.mark.parametrize("picks", [{"action": "shortcut", "shortcut": "quit_app"},
+                                   {"action": "shortcut", "shortcut": "close_tab_or_window"},
+                                   {"action": "system", "system_op": "lock"}])
+def test_low_confidence_risky_action_is_not_executed(monkeypatch, picks):
+    monkeypatch.setattr(config, "ACTION_MIN_CONFIDENCE", 0.0)
+    monkeypatch.setattr(config, "RISKY_MIN_CONFIDENCE", 0.35)
+    assert main.execute(plan_for("close it", picks=picks, conf=0.2), dry=True) == "Not sure what you meant."
+    assert main.execute(plan_for("close it", picks=picks, conf=0.9), dry=True).startswith("[dry]")
 
 
 def test_plan_confidence_is_the_minimum_of_used_answers():
@@ -517,7 +530,8 @@ def test_unstaged_keeps_full_action_options():
     assert prov.calls[0][1]["action"]["criteria"] == ACTIONS
 
 
-def test_low_confidence_stop_is_not_executed():
+def test_low_confidence_stop_is_not_executed(monkeypatch):
+    monkeypatch.setattr(config, "ACTION_MIN_CONFIDENCE", 0.0)
     p = plan_for("stop listening", picks={"action": "stop"}, conf=0.2)
     assert main.execute(p, dry=True) == "Not sure what you meant."
     assert main.execute(plan_for("stop listening", picks={"action": "stop"}, conf=0.9), dry=True) == "__stop__"
@@ -580,3 +594,116 @@ def test_compound_open_youtube_and_search_runs_one_youtube_search(monkeypatch):
     monkeypatch.setattr(main.time, "sleep", lambda s: None)
     assert main.handle(fake, Mock(), "open YouTube and search veritasium", dry=True)
     assert [(p.action, p.args["engine"]) for p in ran] == [("web_search", "youtube")]
+
+
+def test_open_site_then_search_merges_whatever_engine_laya_guessed():
+    steps = brain.merge_site_searches([("open youtube", _site("youtube")),
+                                       ("search mkbhd", _search("search mkbhd", "perplexity", "mkbhd"))])
+    assert [p.args["engine"] for _, p in steps] == ["youtube"]
+
+
+def test_named_engines_in_spoken_order():
+    assert brain.named_engines("find cats on youtube not google") == ["youtube", "google"]
+    assert brain.named_engines("search google maps for cafes") == ["google_maps"]
+    assert brain.named_engines("search mrbeast") == []
+
+
+@pytest.mark.parametrize("utterance,picked,front,expected", [
+    ("search mrbeast", "perplexity", "youtube", "youtube"),
+    ("search mrbeast", "perplexity", None, "google"),
+    ("search mrbeast", "google", "netflix", "google"),
+    ("search mrbeast", "google", "amazon", "amazon"),
+    ("search google for mrbeast", "google", "youtube", "google"),
+    ("search mrbeast on youtube", "perplexity", None, "youtube"),
+    ("find videos of mrbeast", "youtube", "amazon", "youtube"),
+    ("find mrbeast", "youtube", None, "google"),
+])
+def test_resolve_engine(utterance, picked, front, expected):
+    plan = brain.resolve_engine(_search(utterance, picked, "mrbeast"), lambda: front)
+    assert plan.args["engine"] == expected
+
+
+def test_resolve_engine_reads_the_screen_only_for_unnamed_searches():
+    front = Mock(return_value="youtube")
+    brain.resolve_engine(_search("search youtube for cats", "youtube", "cats"), front)
+    brain.resolve_engine(_site("youtube"), front)
+    front.assert_not_called()
+
+
+def test_follow_up_search_uses_the_front_tab(monkeypatch):
+    fake = Mock()
+    fake.evaluate.return_value = _search("search mrbeast", "perplexity", "mrbeast")
+    ran = []
+    monkeypatch.setattr(actions, "front_site", lambda: "youtube")
+    monkeypatch.setattr(main, "execute", lambda plan, dry, speaker=None: ran.append(plan) or "")
+    assert main.handle(fake, Mock(), "search mrbeast", dry=True)
+    assert ran[0].args["engine"] == "youtube"
+
+
+def test_click_command_on_screen_skips_the_model(monkeypatch):
+    fake = Mock()
+    ran = []
+    monkeypatch.setattr(main, "on_screen", lambda utterance: Plan(utterance, "click", 1.0, {"target": "iPhone 17 Review"}))
+    monkeypatch.setattr(main, "execute", lambda plan, dry, speaker=None: ran.append(plan) or "")
+    assert main.handle(fake, Mock(), "play iphone 17 review", dry=True)
+    fake.evaluate.assert_not_called()
+    assert (ran[0].action, ran[0].args["target"]) == ("click", "iPhone 17 Review")
+
+
+@pytest.mark.parametrize("said,clean", [("Now search Mr. Who's the boss", "search Mr. Who's the boss"),
+                                        ("okay, and then open youtube", "open youtube"),
+                                        ("search now", "search now"), ("now", "now")])
+def test_strip_filler(said, clean):
+    assert brain.strip_filler(said) == clean
+
+
+@pytest.mark.parametrize("url,title,site", [
+    ("https://www.youtube.com/watch?v=x", "", "youtube"),
+    ("https://youtube.com", "", "youtube"),
+    ("https://www.google.com/maps/place/x", "", "google_maps"),
+    ("https://www.google.com/search?q=a", "", "google"),
+    ("https://www.amazon.in/s?k=a", "", "amazon"),
+    ("https://notyoutube.com", "", None),
+    ("https://www.netflix.com", "", None),
+    ("", "MKBHD - YouTube", "youtube"),
+    ("", "Notes", None),
+])
+def test_site_of(url, title, site):
+    assert actions.site_of(url, title) == site
+
+
+@pytest.mark.parametrize("query,action", [("YouTube", "open_website"), ("youtube.", "open_website"),
+                                          ("YouTube shorts", "web_search"), ("mrbeast", "web_search")])
+def test_search_naming_only_the_site_opens_it(query, action):
+    plan = brain.search_to_site(_search(f"search {query}", "youtube", query))
+    assert plan.action == action
+    if action == "open_website":
+        assert plan.args["url"] == actions.SITES["youtube"] and "query" not in plan.args
+
+
+def test_search_runs_in_the_focused_tab_when_it_is_on_that_site(monkeypatch):
+    pressed, typed = [], []
+    monkeypatch.setattr(actions, "frontmost_app", lambda: "Arc")
+    monkeypatch.setattr(actions, "front_site", lambda: "youtube")
+    monkeypatch.setattr(actions, "press", pressed.append)
+    monkeypatch.setattr(actions, "type_text", typed.append)
+    monkeypatch.setattr(actions.time, "sleep", lambda s: None)
+    assert actions.search_here("youtube", "mr beast")
+    assert pressed == ["address_bar", "enter"]
+    assert typed == ["https://www.youtube.com/results?search_query=mr+beast"]
+    assert not actions.search_here("amazon", "mr beast")
+
+
+def test_search_from_another_app_opens_a_tab(monkeypatch):
+    monkeypatch.setattr(actions, "front_site", Mock(return_value="youtube"))
+    assert not actions.search_here("youtube", "cats")
+    actions.front_site.assert_not_called()
+
+
+def test_ordinal_click_executes_the_observed_element(monkeypatch):
+    desk = Mock()
+    page, action = {"actions": []}, {"id": "e9", "kind": "click", "label": "Video"}
+    monkeypatch.setattr(main, "_DESKTOP", desk)
+    monkeypatch.setattr(main, "_CLICK", (page, action))
+    assert main.execute(Plan("open the first video", "click", 1.0, {"target": "Video"})) == ""
+    desk.act.assert_called_once_with(action, page)

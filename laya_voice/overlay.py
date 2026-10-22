@@ -33,7 +33,7 @@ COLORS = {
     "done": (0.30, 0.85, 0.45),
     "error": (1.00, 0.45, 0.20),
 }
-IDLE_TEXT = "Listening"
+IDLE_TEXT = "Ready"
 HEIGHT = 34.0
 MIN_W, MAX_W = 150.0, 720.0
 
@@ -45,6 +45,7 @@ class Overlay:
         self.dot = None
         self._gen = 0
         self._lock = threading.Lock()
+        self.idle_text = IDLE_TEXT
 
     # ---------------------------------------------------------- main thread
 
@@ -83,7 +84,7 @@ class Overlay:
         lb.cell().setUsesSingleLineMode_(True)
         root.addSubview_(lb)
 
-        self._apply("idle", IDLE_TEXT)
+        self._apply("idle", self.idle_text)
         p.orderFrontRegardless()
 
     def _apply(self, state: str, text: str) -> None:
@@ -114,10 +115,16 @@ class Overlay:
             if revert_after:
                 def _revert() -> None:
                     if self._gen == gen:
-                        self._apply("idle", IDLE_TEXT)
+                        self._apply("idle", self.idle_text)
                 AppHelper.callLater(revert_after, _revert)
 
         AppHelper.callAfter(_do)
+
+    def idle(self, text: str | None = None) -> None:
+        """Set what the resting pill says for this mode (and show it now)."""
+        if text is not None:
+            self.idle_text = text
+        self.set("idle", self.idle_text)
 
     # ---------------------------------------------------------- lifecycle
 
@@ -133,11 +140,21 @@ class Overlay:
                 AppHelper.callAfter(AppHelper.stopEventLoop)
 
         threading.Thread(target=_thread, daemon=True, name="jev-worker").start()
-        AppHelper.runEventLoop(installInterrupt=True)
+
+        # Python runs signal handlers only between bytecodes on the main thread; inside the Cocoa
+        # loop that never happens, so Ctrl-C was ignored. A cheap timer gives the handler a turn.
+        def _tick() -> None:
+            AppHelper.callLater(0.2, _tick)
+
+        AppHelper.callLater(0.2, _tick)
+        AppHelper.runEventLoop(installInterrupt=False)
 
 
 class NullOverlay:
     def set(self, state: str, text: str, revert_after: float | None = None) -> None:
+        pass
+
+    def idle(self, text: str | None = None) -> None:
         pass
 
     def run(self, worker: Callable[[], None]) -> None:

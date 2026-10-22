@@ -7,7 +7,7 @@ import subprocess
 import time
 from functools import lru_cache
 from pathlib import Path
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse
 
 # ---------------------------------------------------------------- apps
 
@@ -176,9 +176,131 @@ SEARCH_ENGINES: dict[str, str] = {
 }
 
 
+def search_url(engine: str, query: str) -> str:
+    return SEARCH_ENGINES.get(engine, SEARCH_ENGINES["google"]).format(q=quote_plus(query))
+
+
 def web_search(engine: str, query: str) -> None:
-    tpl = SEARCH_ENGINES.get(engine, SEARCH_ENGINES["google"])
-    open_url(tpl.format(q=quote_plus(query)))
+    open_url(search_url(engine, query))
+
+
+# ---------------------------------------------------------------- front browser tab
+
+BROWSERS = {"google chrome", "safari", "arc", "firefox", "brave browser", "microsoft edge", "chromium", "opera", "vivaldi"}
+TERMINALS = {"terminal", "iterm2", "warp", "ghostty", "kitty", "alacritty", "wezterm", "hyper", "tabby",
+             "zed", "code", "visual studio code", "cursor", "windsurf"}
+
+SITE_HOSTS: dict[str, tuple[str, ...]] = {
+    "google_maps": ("google.com/maps", "maps.google.com"),
+    "youtube": ("youtube.com", "youtu.be"),
+    "amazon": ("amazon.com", "amazon.in", "amazon.co.uk", "amazon.de", "amazon.ca"),
+    "wikipedia": ("wikipedia.org",),
+    "github": ("github.com",),
+    "twitter_x": ("x.com", "twitter.com"),
+    "reddit": ("reddit.com",),
+    "spotify": ("open.spotify.com",),
+    "perplexity": ("perplexity.ai",),
+    "google": ("google.com",),
+}
+SITE_TITLES: dict[str, tuple[str, ...]] = {
+    "youtube": (" - YouTube", "YouTube"),
+    "wikipedia": (" - Wikipedia",),
+    "github": (" · GitHub", "GitHub"),
+    "reddit": ("Reddit",),
+    "amazon": ("Amazon.com", "Amazon.in"),
+    "perplexity": (" - Perplexity", "Perplexity"),
+}
+
+
+def site_of(url: str = "", title: str = "") -> str | None:
+    """The SITE_HOSTS key of a page, from its URL or else its window title."""
+    p = urlparse(url if "//" in url else "//" + url) if url else None
+    host = p.netloc.lower() if p else ""
+    for site, patterns in SITE_HOSTS.items():
+        for pat in patterns:
+            h, _, path = pat.partition("/")
+            if host and (host == h or host.endswith("." + h)) and (p.path or "/").startswith("/" + path):
+                return site
+    for site, marks in SITE_TITLES.items():
+        if any(title.endswith(m) or f"{m} " in title for m in marks):
+            return site
+    return None
+
+
+def front_browser() -> tuple[str, int] | None:
+    """The browser the user is looking at: the frontmost app, or, when we were launched from a
+    terminal that has focus (--text, --ptt), the browser window just behind it."""
+    pid, name = frontmost_pid(), frontmost_app()
+    if name.lower() in BROWSERS:
+        return name, pid
+    if name.lower() not in TERMINALS:
+        return None
+    try:
+        import Quartz  # type: ignore
+
+        opts = Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements
+        for w in Quartz.CGWindowListCopyWindowInfo(opts, Quartz.kCGNullWindowID) or []:
+            owner = str(w.get("kCGWindowOwnerName", ""))
+            if w.get("kCGWindowLayer") == 0 and owner.lower() in BROWSERS:
+                return owner, int(w["kCGWindowOwnerPID"])
+    except Exception:
+        pass
+    return None
+
+
+def browser_page(pid: int, budget_s: float = 0.3) -> tuple[str, str]:
+    """(url, window title) of a browser's focused tab, read from the Accessibility tree, so no
+    Automation permission is needed. The URL is empty when the web area is not reachable in time."""
+    try:
+        import ApplicationServices as AS  # type: ignore
+    except Exception:
+        return "", ""
+
+    def attr(el, name):
+        try:
+            err, v = AS.AXUIElementCopyAttributeValue(el, name, None)
+        except Exception:
+            return None
+        return v if err == 0 else None
+
+    app = AS.AXUIElementCreateApplication(pid)
+    try:
+        AS.AXUIElementSetAttributeValue(app, "AXManualAccessibility", True)
+    except Exception:
+        pass
+    win = attr(app, "AXFocusedWindow") or next(iter(attr(app, "AXWindows") or []), None)
+    if win is None:
+        return "", ""
+    title = str(attr(win, "AXTitle") or "")
+    queue, deadline = [win], time.perf_counter() + budget_s
+    while queue and time.perf_counter() < deadline:
+        node = queue.pop(0)
+        if attr(node, "AXRole") == "AXWebArea":
+            url = attr(node, "AXURL")
+            if url is not None:
+                return str(url.absoluteString() if hasattr(url, "absoluteString") else url), title
+        queue.extend(attr(node, "AXChildren") or [])
+    return "", title
+
+
+def front_site() -> str | None:
+    found = front_browser()
+    if not found:
+        return None
+    url, title = browser_page(found[1])
+    return site_of(url, title)
+
+
+def search_here(engine: str, query: str) -> bool:
+    """Run the search in the focused browser tab when it is already on that site, instead of
+    `open`, which always makes a new tab."""
+    if frontmost_app().lower() not in BROWSERS or front_site() != engine:
+        return False
+    press("address_bar")
+    time.sleep(0.15)
+    type_text(search_url(engine, query))
+    press("enter")
+    return True
 
 
 # ---------------------------------------------------------------- keyboard

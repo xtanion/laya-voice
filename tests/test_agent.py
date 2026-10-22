@@ -12,6 +12,11 @@ from laya_voice import policy
 from laya_voice.desktop import StaleScreen, fingerprint
 
 
+@pytest.fixture(autouse=True)
+def jev_policy(monkeypatch):
+    monkeypatch.setattr(policy.config, "DECISION_PROVIDER", "jev")
+
+
 def screen():
     state = {
         "app": "Notes",
@@ -589,3 +594,62 @@ def test_option_label_drops_durations_and_shows_the_part_the_user_said():
     shown = policy.option_label(SIDEBAR["mix"], "play the sunset lake mix", 50)
     assert "Sunset Lake Mix" in shown and "RUFUS" not in shown
     assert policy.option_label(SIDEBAR["mix"]).startswith("RUFUS DU SOL")
+
+
+CLICK_LABELS = {"1": "Subscribe", "2": "iPhone 17 Review: Worth it? 12 minutes", "3": "Music",
+                "4": "Despacito Luis Fonsi", "5": "Next (SHIFT+n)"}
+
+
+@pytest.mark.parametrize("goal,where,expected", [
+    ("click subscribe", "Arc", "1"),
+    ("click on subscribe", "Arc", "1"),
+    ("play iphone 17 review by mrwhosetheboss", "Arc", "2"),
+    ("play despacito on youtube", "Arc MKBHD - YouTube", "4"),
+    ("play the despacito video in the sidebar", "Arc", "4"),
+    ("play", "Arc", None),
+    ("play music", "Arc", None),
+    ("play despacito on spotify", "Arc MKBHD - YouTube", None),
+    ("open youtube", "Arc", None),
+    ("volume up", "Arc", None),
+    ("click the blue button", "Arc", None),
+])
+def test_click_target(monkeypatch, goal, where, expected):
+    monkeypatch.setattr(policy, "_names_place", lambda text: text.strip().lower() in {"spotify", "youtube"})
+    assert policy.click_target(goal, CLICK_LABELS, where) == expected
+
+
+def _video(i, label, x, y):
+    return {"id": f"v{i}", "kind": "click", "role": "link", "label": label, "rect": {"x": x, "y": y, "w": 300, "h": 40}}
+
+
+RESULTS = [
+    _video(1, "Subscribe", 900, 100) | {"role": "button"},
+    _video(2, "14 minutes, 30 seconds", 300, 200),
+    _video(3, "I Survived 100 Days 14 minutes, 30 seconds", 700, 205),
+    _video(4, "$1 vs $1,000,000 Hotel 21 minutes", 700, 505),
+    _video(5, "$1 vs $1,000,000 Hotel 21 minutes", 300, 500),
+    _video(6, "Shorts", 700, 650),
+    _video(7, "World's Largest Lego Tower 1 hour, 2 minutes", 700, 805),
+    _video(8, "4 Minutes 2 Seconds of 6 Minutes 32 Seconds", 400, 150) | {"role": "button"},
+]
+
+
+@pytest.mark.parametrize("goal,expected", [
+    ("open the first video", "v3"),
+    ("play the second video", "v5"),
+    ("click the third result", "v7"),
+    ("open first video", "v3"),
+    ("play the last video", "v7"),
+    ("open the fifth video", None),
+    ("open the first tab", None),
+    ("what is the first video", None),
+])
+def test_ordinal_target(goal, expected):
+    assert policy.ordinal_target(goal, RESULTS) == expected
+
+
+def test_click_target_ignores_the_site_named_after_on(monkeypatch):
+    monkeypatch.setattr(policy, "_names_place", lambda text: text.strip().lower() == "youtube")
+    labels = {"c": "Mrwhosetheboss YouTube · 2.3Cr+ followers", "v": "iPhone Duo Review - Messier Than You Think 20 minutes"}
+    assert policy.click_target("play the iphone duo review on youtube", labels, "Arc - YouTube") == "v"
+    assert policy.click_target("open the first link on youtube", labels, "Arc - YouTube") is None

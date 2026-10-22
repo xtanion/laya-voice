@@ -35,7 +35,9 @@ JEV_MODEL = os.environ.get("JEV_MODEL", "jev-latest")
 WHISPER_MODEL = Path(os.environ.get("WHISPER_MODEL", ROOT / "models" / "ggml-base.en.bin"))
 WHISPER_PORT = int(os.environ.get("WHISPER_PORT", "8178"))
 WHISPER_THREADS = int(os.environ.get("WHISPER_THREADS", "6"))
-WHISPER_PROMPT = os.environ.get("WHISPER_PROMPT", "")
+WHISPER_PROMPT = ("Voice commands for a Mac: open, close, quit, skip, pause, play, mute, unmute, volume up, "
+                  "scroll down, copy, paste, undo, type, write, press enter, search YouTube, Google, Amazon, "
+                  "GitHub, Reddit, Slack, Spotify, Chrome.")
 
 SAMPLE_RATE = 16000
 
@@ -45,5 +47,7 @@ TTS_VOICE = os.environ.get("TTS_VOICE", "Samantha")
 TTS_RATE = int(os.environ.get("TTS_RATE", "210"))
 
 # Confidence gates (tune on your own usage; see docs.typesafe.ai/confidence)
-ACTION_MIN_CONFIDENCE = float(os.environ.get("ACTION_MIN_CONFIDENCE", "0.35"))
+ACTION_MIN_CONFIDENCE = float(os.environ.get("ACTION_MIN_CONFIDENCE", "0"))
+# Disruptive actions (quitting an app, closing a tab, locking or sleeping) still need this much.
+RISKY_MIN_CONFIDENCE = float(os.environ.get("RISKY_MIN_CONFIDENCE", "0.35"))
 YES = 0.6

@@ -200,8 +200,9 @@ One request per utterance with ~15 speculative questions evaluated in parallel:
 - `submit`, `compound` — Nouls.
 
 Code reads only the answers the chosen action needs. Plan confidence is the
-minimum over the judgements used. Below `ACTION_MIN_CONFIDENCE` (0.35) it says
-"not sure" instead of acting. Thresholds live in `laya_voice/config.py`.
+minimum over the judgements used. Low-confidence plans still run (`ACTION_MIN_CONFIDENCE`
+defaults to 0), except disruptive ones (quit app, close tab, system actions, stop listening),
+which say "not sure" below `RISKY_MIN_CONFIDENCE` (0.35). Thresholds live in `laya_voice/config.py`.
 
 ## Latency (Mac mini M4, measured)
 

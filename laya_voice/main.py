@@ -15,6 +15,7 @@ import argparse
 import os
 import queue
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -23,7 +24,7 @@ import time
 import numpy as np
 
 from . import actions, config
-from .brain import Brain, Plan, merge_site_searches, split_compound
+from .brain import Brain, Plan, merge_site_searches, resolve_engine, search_to_site, split_compound, strip_filler
 from .overlay import NullOverlay
 from .persona import flavor
 from .tts import Speaker
@@ -36,7 +37,6 @@ SOUND_FAIL = "/System/Library/Sounds/Basso.aiff"
 SOUND_DONE = "/System/Library/Sounds/Glass.aiff"
 # FEEDBACK=ding (default): chime when an action completes, no speech. FEEDBACK=voice: spoken butler replies.
 FEEDBACK = os.environ.get("FEEDBACK", "ding")
-IDLE_LABEL = "Listening"
 
 
 def ding(path: str) -> None:
@@ -44,6 +44,7 @@ def ding(path: str) -> None:
 
 
 _DESKTOP = None
+_CLICK: tuple[dict, dict] | None = None
 
 
 TASK_DRIVER = os.environ.get("TASK_DRIVER", "browser")
@@ -53,7 +54,7 @@ SELLER_MESSAGE = os.environ.get("SELLER_MESSAGE", "Hi! Is this still available?"
 
 
 def run_task(goal: str, speaker: Speaker | None = None, start_url: str | None = None, recommend: bool = False,
-             message: str | None = None) -> str:
+             message: str | None = None, driver: str | None = None) -> str:
     """Multi-step goal: the jev-ultrafast loop. TASK_DRIVER=browser (default) drives Chrome over
     CDP exactly as jev-ultrafast does; TASK_DRIVER=desktop uses the experimental AX-tree port.
     One Jev request per step; the executor only ever touches observed controls."""
@@ -70,7 +71,8 @@ def run_task(goal: str, speaker: Speaker | None = None, start_url: str | None = 
         print(f"  ▶ {line}")
         OVERLAY.set("thinking", f"{step['step']}. {line}")
 
-    if TASK_DRIVER == "browser":
+    driver = driver or TASK_DRIVER
+    if driver == "browser":
         from .web import WebAgent
 
         agent_cm = WebAgent(goal, url=start_url, display=os.environ.get("AGENT_DISPLAY") or None, on_step=show)
@@ -91,8 +93,9 @@ def run_task(goal: str, speaker: Speaker | None = None, start_url: str | None = 
         st = agent.state
         from .costs import run_costs, usd
 
-        reply = "Done." if st["status"] == "done" else "I couldn't finish that."
-        if recommend and TASK_DRIVER == "browser" and st["status"] == "done":
+        acted = any(h.get("kind") not in ("wait", None) for h in st["history"])
+        reply = "Done." if st["status"] == "done" and acted else "I couldn't finish that."
+        if recommend and driver == "browser" and st["status"] == "done":
             try:
                 rec = agent.recommend()
                 OVERLAY.set("done", f"★ {rec['summary']}", revert_after=8.0)
@@ -109,13 +112,21 @@ def run_task(goal: str, speaker: Speaker | None = None, start_url: str | None = 
         return reply
 
 
+RISKY_SHORTCUTS = {"quit_app", "close_tab_or_window"}
+
+
+def min_confidence(plan: Plan) -> float:
+    risky = plan.action in ("system", "stop") or plan.args.get("shortcut") in RISKY_SHORTCUTS
+    return max(config.ACTION_MIN_CONFIDENCE, config.RISKY_MIN_CONFIDENCE) if risky else config.ACTION_MIN_CONFIDENCE
+
+
 def execute(plan: Plan, dry: bool = False, speaker: Speaker | None = None) -> str:
     """Run the plan. Returns the short spoken confirmation."""
     a = plan.args
     act = plan.action
     if act == "none":
         return ""
-    if plan.confidence < config.ACTION_MIN_CONFIDENCE:
+    if plan.confidence < min_confidence(plan):
         return "Not sure what you meant."
     if act == "stop":
         return "__stop__"
@@ -125,7 +136,7 @@ def execute(plan: Plan, dry: bool = False, speaker: Speaker | None = None) -> st
         site = plan.answers.get("site", {}).get("choice") if plan.answers else None
         return run_task(plan.utterance, speaker, start_url=actions.SITES.get(site) if site else None,
                         recommend=bool(a.get("recommend")) or bool(a.get("message_seller")),
-                        message=SELLER_MESSAGE if a.get("message_seller") else None)
+                        message=SELLER_MESSAGE if a.get("message_seller") else None, driver=a.get("driver"))
     if a.get("in_app"):
         if not actions.focus_app(a["in_app"]):
             return f"I couldn't bring up {a['in_app']}."
@@ -145,8 +156,13 @@ def execute(plan: Plan, dry: bool = False, speaker: Speaker | None = None) -> st
     if act == "open_website":
         actions.open_url(a["url"])
         return f"Opening {a['site'].replace('_', ' ')}."
+    if act == "click":
+        page, action = _CLICK
+        _DESKTOP.act(action, page)
+        return ""
     if act == "web_search":
-        actions.web_search(a["engine"], a["query"])
+        if not actions.search_here(a["engine"], a["query"]):
+            actions.web_search(a["engine"], a["query"])
         return f"Searching {a['engine'].replace('_', ' ')} for {a['query']}."
     if act == "type_text":
         actions.type_text(a["text"])
@@ -175,10 +191,47 @@ def execute(plan: Plan, dry: bool = False, speaker: Speaker | None = None) -> st
     return ""
 
 
+def on_screen(utterance: str) -> Plan | None:
+    """A plan to click the visible control a 'click/play X' command names, read from the frontmost
+    app (or the browser behind the terminal we were started from): 'the second video' by position,
+    'play X by Y' by shared words. Code picks the element; the agent's step loop added only waits."""
+    global _DESKTOP, _CLICK
+    from .policy import CLICK_GOAL, click_target, ordinal_target
+
+    if not CLICK_GOAL.match(utterance):
+        return None
+    if actions.frontmost_app().lower() in actions.TERMINALS:
+        found = actions.front_browser()
+        if not found or not actions.focus_app(found[0]):
+            return None
+    from .desktop import Desktop
+
+    if _DESKTOP is None:
+        _DESKTOP = Desktop()
+    screen = _DESKTOP.observe()
+    hit = ordinal_target(utterance, screen["actions"])
+    if hit:
+        action = next(a for a in screen["actions"] if a["id"] == hit)
+        _CLICK = (screen, action)
+        return Plan(utterance, "click", 1.0, {"target": action["label"]})
+    clicks = {a["id"]: a for a in screen["actions"] if a.get("kind") == "click"}
+    where = f"{screen['app']} {screen['title']} {(actions.front_site() or '').replace('_', ' ')}"
+    key = click_target(utterance, {k: a.get("label", "") for k, a in clicks.items()}, where)
+    if not key:
+        return None
+    _CLICK = (screen, clicks[key])
+    return Plan(utterance, "click", 1.0, {"target": clicks[key]["label"]})
+
+
 def handle(brain: Brain, speaker: Speaker, utterance: str, dry: bool, depth: int = 0, plan: Plan | None = None) -> bool:
     """Returns False when the user asked to stop."""
     OVERLAY.set("thinking", f"{utterance}")
+    if plan is None:
+        utterance = strip_filler(utterance)
+    if plan is None and depth == 0:
+        plan = on_screen(utterance)
     plan = plan or brain.evaluate(utterance)
+    plan = search_to_site(resolve_engine(plan, actions.front_site))
     print(f"  → {plan}")
     if plan.error:
         if not dry:
@@ -248,6 +301,7 @@ def describe(plan: Plan) -> str:
         "open_folder": lambda: f"Open {a.get('folder')}",
         "system": lambda: f"{a.get('op', '').replace('_', ' ').capitalize()}",
         "task": lambda: f"Task: {plan.utterance}",
+        "click": lambda: f"Click {a.get('target', '')[:60]}",
         "stop": lambda: "Bye",
     }.get(act, lambda: act)() + (f"  ·  in {a['in_app']}" if a.get("in_app") else "")
 
@@ -294,11 +348,13 @@ class Session:
         """Transcribe + plan + execute. Returns False on 'stop'."""
         if len(pcm) < config.SAMPLE_RATE * 0.25:
             return True
+        OVERLAY.set("heard", "Transcribing…")
         t0 = time.perf_counter()
         text = self.stt.transcribe(pcm)
         stt_ms = int((time.perf_counter() - t0) * 1000)
         if not text:
             print("  (heard nothing)")
+            OVERLAY.idle()
             return True
         print(f"🗣  {text}   ({len(pcm)/config.SAMPLE_RATE:.1f}s audio, stt {stt_ms}ms)")
         if not self.listener:
@@ -369,6 +425,7 @@ def run_smart(s: Session) -> None:
         s.speaker.interrupt()
         ding(SOUND_START)
         arm(10.0)
+        OVERLAY.set("listening", "Listening…")
 
     if not capslock_remapped():
         remap_capslock()
@@ -377,35 +434,43 @@ def run_smart(s: Session) -> None:
     names = ", ".join(w.capitalize() for w in WAKE_WORDS[:2])
     print(f"🎙  Hands-free. Say \"{names.split(', ')[0]}, open chrome\"."
           + (" Or tap CAPS LOCK then speak." if caps else " (Caps Lock tap unavailable: no Accessibility/Input Monitoring.)")
-          + f"  ({s.brain.label}, whisper base.en, voice {s.speaker.engine}:{s.speaker.voice})")
+          + f"  ({s.brain.label}, whisper {config.WHISPER_MODEL.stem.removeprefix('ggml-')}, voice {s.speaker.engine}:{s.speaker.voice})")
     if FEEDBACK == "voice":
         s.speaker.say(flavor("Ready."))
     else:
         ding(SOUND_DONE)
     s.listener.pause(0.8)
-    s.listener.on_speech_start = lambda: OVERLAY.set("listening", "Listening…")
+    OVERLAY.idle(f"Say \"{WAKE_WORDS[0].capitalize()}\" or tap Caps Lock")
+
+    def armed_now() -> bool:
+        return time.monotonic() < armed["until"]
+
+    # Background speech (a video, a call) must not light up the pill; only a summoned listen does.
+    s.listener.on_speech_start = lambda: OVERLAY.set("listening", "Listening…") if armed_now() else None
     while True:
         pcm = s.listener.next_utterance()
-        OVERLAY.set("heard", "Transcribing…")
+        if armed_now():
+            OVERLAY.set("heard", "Transcribing…")
         t0 = time.perf_counter()
         text = s.stt.transcribe(pcm)
         stt_ms = int((time.perf_counter() - t0) * 1000)
         if not text:
-            OVERLAY.set("idle", IDLE_LABEL, revert_after=0.1)
+            OVERLAY.idle()
             continue
-        OVERLAY.set("heard", text)
         addressed, cmd = strip_wake(text)
+        if addressed or armed_now():
+            OVERLAY.set("heard", text)
         if not addressed and time.monotonic() < armed["until"]:
             addressed, cmd = True, text
         if not cmd and addressed:        # just the name: acknowledge and wait for the command
             ding(SOUND_START)
             arm(FOLLOWUP_SECONDS)
+            OVERLAY.set("listening", "Listening…")
             continue
         gate = None
         if not addressed:
             if not UNNAMED_COMMANDS:
                 print(f"   ·  {text}   (ignored: no name, stt {stt_ms}ms)")
-                OVERLAY.set("idle", f"Ignored: {text}", revert_after=2.5)
                 continue
             # No name: let Jev judge whether this is a command for the computer at all.
             gate = s.brain.evaluate(text)
@@ -420,7 +485,6 @@ def run_smart(s: Session) -> None:
                 continue
             if not ok_cmd:
                 print(f"   ·  {text}   (ignored: addressed={gate.args.get('addressed')} {gate.action} conf={gate.confidence:.2f}, stt {stt_ms}ms)")
-                OVERLAY.set("idle", f"Ignored: {text}", revert_after=2.5)
                 continue
             cmd = text
         tag = f", addressed={gate.args.get('addressed')}" if gate else ""
@@ -471,6 +535,7 @@ def run_capslock(s: Session) -> None:
             return
         s.speaker.interrupt()
         ding(SOUND_START)
+        OVERLAY.set("listening", "Listening…")
         recording.set()
 
     def on_release() -> None:
@@ -479,6 +544,7 @@ def run_capslock(s: Session) -> None:
             return
         if held < 0.25:               # short tap: latch hands-free
             state["latched"] = True
+            OVERLAY.set("listening", "Listening… tap Caps Lock to stop")
             return
         recording.clear()
         ding(SOUND_STOP)
@@ -502,7 +568,8 @@ def run_capslock(s: Session) -> None:
                 s.speaker.say("Permissions granted. Please restart me.")
                 sys.exit(3)
             perms = request_permissions()
-    print(f"⌨️  Hold CAPS LOCK and speak. Tap it to toggle hands-free. ({s.brain.label}, whisper base.en, voice {s.speaker.engine}:{s.speaker.voice})")
+    OVERLAY.idle("Hold Caps Lock to talk")
+    print(f"⌨️  Hold CAPS LOCK and speak. Tap it to toggle hands-free. ({s.brain.label}, whisper {config.WHISPER_MODEL.stem.removeprefix('ggml-')}, voice {s.speaker.engine}:{s.speaker.voice})")
     s.speaker.say(flavor("Ready."))
     while True:
         pcm = done.get()
@@ -527,7 +594,8 @@ def run_remote(s: Session) -> None:
 
     ble = BleReceiver(on_press, on_audio, on_event=lambda m: print(f"  [module] {m}"))
     ble.start()
-    print(f"Looking for the voice module over Bluetooth. Hold its button and speak. ({s.brain.label}, whisper base.en)")
+    OVERLAY.idle("Hold the module button to talk")
+    print(f"Looking for the voice module over Bluetooth. Hold its button and speak. ({s.brain.label}, whisper {config.WHISPER_MODEL.stem.removeprefix('ggml-')})")
     try:
         while True:
             if not s.process(done.get()):
@@ -537,7 +605,9 @@ def run_remote(s: Session) -> None:
 
 
 def run_always_on(s: Session) -> None:
-    print(f"🎙  Listening ({s.brain.label}, whisper base.en). Say 'stop listening' to quit.")
+    OVERLAY.idle("Listening")
+    s.listener.on_speech_start = lambda: OVERLAY.set("listening", "Listening…")
+    print(f"🎙  Listening ({s.brain.label}, whisper {config.WHISPER_MODEL.stem.removeprefix('ggml-')}). Say 'stop listening' to quit.")
     s.speaker.say(flavor("Ready."))
     s.listener.pause(0.8)
     while True:
@@ -548,9 +618,11 @@ def run_always_on(s: Session) -> None:
 
 def run_ptt(s: Session) -> None:
     print("⏎  Push-to-talk: Enter to start, Enter to stop.")
+    OVERLAY.idle("Press Enter to talk")
     while True:
         input("  [Enter] to talk… ")
         s.listener.drain()
+        OVERLAY.set("listening", "Listening… Enter to stop")
         print("  recording, [Enter] to stop")
         parts: list[np.ndarray] = []
         stop = threading.Event()
@@ -570,8 +642,18 @@ def run_ptt(s: Session) -> None:
             break
 
 
+def shutdown(*_: object) -> None:
+    """Stop at once: end whisper-server and other children, then exit without the interpreter's
+    shutdown, which can hang on an open microphone stream."""
+    print("\nStopping.", flush=True)
+    subprocess.run(["pkill", "-TERM", "-P", str(os.getpid())], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    os._exit(0)
+
+
 def run_voice(args: argparse.Namespace) -> None:
     global OVERLAY
+    signal.signal(signal.SIGINT, shutdown)
+    signal.signal(signal.SIGTERM, shutdown)
     if not args.no_overlay and os.environ.get("OVERLAY", "1") not in ("0", "false", "no"):
         from .overlay import Overlay
         OVERLAY = Overlay()
@@ -595,6 +677,7 @@ def run_voice(args: argparse.Namespace) -> None:
             s.close()
 
     OVERLAY.run(worker)
+    shutdown()
 
 
 def main() -> None:

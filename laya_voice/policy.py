@@ -208,6 +208,74 @@ def _words(text: str) -> list[str]:
     return [w for w in _WORD.findall(plain) if len(w) > 2 or w.isdigit()]
 
 
+def _shared(content: list[str], label: str) -> int:
+    tokens = _words(label)
+    return sum(any(t.startswith(w[:5]) or w.startswith(t[:5]) for t in tokens) for w in content)
+
+
+CLICK_GOAL = re.compile(r"^(?:please\s+)?(?:click|tap|select|choose|play|watch|"
+                        r"open\s+(?:the|that|this|first|second|third|fourth|fifth|last|top))\b", re.I)
+_ORDINALS = {"first": 1, "1st": 1, "top": 1, "second": 2, "2nd": 2, "third": 3, "3rd": 3, "fourth": 4, "4th": 4,
+             "fifth": 5, "5th": 5, "last": -1}
+_PLAYER_TIME = re.compile(r"\bof \d+ (?:hours?|minutes?|seconds?)", re.I)
+_ORDINAL = re.compile(r"\b(" + "|".join(_ORDINALS) + r")\s+(?:video|result|one|link|song|item)s?\b", re.I)
+_PLAY_GENERIC = {"music", "something", "again", "next", "previous", "track", "playback", "media"}
+_ELSEWHERE = re.compile(r"\s(?:on|in)\s+([a-z][\w ]*)$", re.I)
+
+
+def _names_place(text: str) -> bool:
+    from . import actions
+    from .brain import named_engines
+
+    name = text.strip().lower().removeprefix("the ")
+    return bool(named_engines(name)) or name.replace(" ", "_") in actions.SITES \
+        or any(name == app.lower() for app in actions.installed_apps())
+
+
+def ordinal_target(goal: str, acts: list[dict[str, Any]]) -> str | None:
+    """The id of 'the second video': visible links that carry a duration (how YouTube labels a
+    video) in reading order, one per title since thumbnail and title links repeat it."""
+    m = _ORDINAL.search(goal) if CLICK_GOAL.match(goal) else None
+    if not m:
+        return None
+    videos = [a for a in acts if a.get("kind") == "click" and a.get("rect") and _DURATION.search(a.get("label", ""))
+              and not _PLAYER_TIME.search(a["label"])]
+    videos.sort(key=lambda a: (round(a["rect"]["y"] / 60), a["rect"]["x"]))
+    ids, seen = [], set()
+    for a in videos:
+        title = _DURATION.sub("", a["label"]).strip().lower()[:40]
+        if len(title) >= 4 and title not in seen:
+            seen.add(title)
+            ids.append(a["id"])
+    n = _ORDINALS[m.group(1).lower()]
+    if not ids or n > len(ids):
+        return None
+    return ids[n - 1] if n > 0 else ids[-1]
+
+
+def click_target(goal: str, labels: dict[str, str], where: str = "") -> str | None:
+    """The id of the control a 'click/play X' command names on screen, or None when the command
+    is not about the screen: no content words ('play'), a media command ('play music'), another
+    app or site ('play X on spotify' while `where` is YouTube), or no label sharing a word."""
+    if not CLICK_GOAL.match(goal):
+        return None
+    body = CLICK_GOAL.sub("", goal).strip()
+    tail = _ELSEWHERE.search(body)
+    if tail and _names_place(tail.group(1)):
+        if tail.group(1).strip().lower() not in where.lower():
+            return None
+        body = body[:tail.start()]
+    content = [w for w in _words(body) if w not in _COMMAND_WORDS]
+    if not content or set(content) <= _PLAY_GENERIC or _ORDINAL.search(goal):
+        return None
+    from difflib import SequenceMatcher
+
+    counts = {key: _shared(content, label) for key, label in labels.items()}
+    best = max(labels, default=None,
+               key=lambda key: (counts[key], SequenceMatcher(None, body.lower(), labels[key].lower()).ratio()))
+    return best if best is not None and counts[best] else None
+
+
 def shortlist(goal: str, labels: dict[str, str], k: int = STAGED_TARGETS) -> list[str]:
     """The ids whose labels best match the goal, at most k.
 
@@ -219,12 +287,7 @@ def shortlist(goal: str, labels: dict[str, str], k: int = STAGED_TARGETS) -> lis
 
     words = _words(goal)
     content = [w for w in words if w not in _COMMAND_WORDS] or words
-
-    def shared(key: str) -> int:
-        tokens = _words(labels[key])
-        return sum(any(t.startswith(w[:5]) or w.startswith(t[:5]) for t in tokens) for w in content)
-
-    counts = {key: shared(key) for key in labels}
+    counts = {key: _shared(content, labels[key]) for key in labels}
     ratio = {key: SequenceMatcher(None, goal.lower(), labels[key].lower()).ratio() for key in labels}
     ranked = sorted(labels, key=lambda key: (counts[key] + ratio[key]), reverse=True)
     best = counts[ranked[0]] if ranked else 0

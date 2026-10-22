@@ -53,7 +53,7 @@ TEXT_ROLES = {"AXStaticText", "AXHeading"}
 SKIP_ROLES = {"AXMenuBar", "AXUnknown", "AXSplitter", "AXGrowArea", "AXScrollBar", "AXValueIndicator"}
 CONTAINER_CLIP_ROLES = {"AXWindow", "AXScrollArea", "AXSheet", "AXDrawer", "AXPopover", "AXWebArea"}
 DIALOG_SUBROLES = {"AXDialog", "AXSystemDialog", "AXFloatingWindow"}
-BROWSERS = {"google chrome", "safari", "arc", "firefox", "brave browser", "microsoft edge", "chromium", "opera", "vivaldi"}
+BROWSERS = actions.BROWSERS
 
 ATTRS = [
     "AXRole", "AXSubrole", "AXTitle", "AXDescription", "AXValue", "AXPlaceholderValue", "AXHelp",

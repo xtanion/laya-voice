@@ -13,7 +13,7 @@ import re
 import time
 from dataclasses import dataclass, field, replace
 from difflib import SequenceMatcher
-from typing import Any
+from typing import Any, Callable
 
 from . import actions, config
 from .providers import DecisionProvider, ProviderError, make_provider, validate_answers
@@ -533,6 +533,14 @@ class Brain:
 _SUBMIT_ONLY = re.compile(r"^(?:then\s+)?(?:hit|press|and)?\s*(?:enter|return|send|submit)(?:\s+it)?$", re.I)
 
 
+_FILLER = re.compile(r"^(?:(?:now|okay|ok|so|and|then|also|alright|hey|um|uh|please|can you|could you)\b[\s,.]*)+", re.I)
+
+
+def strip_filler(utterance: str) -> str:
+    """'Now search X' -> 'search X': leading fillers end up in the query otherwise."""
+    return _FILLER.sub("", utterance).strip() or utterance
+
+
 def split_compound(utterance: str) -> list[str]:
     """Split 'A and then B' into parts. A trailing 'hit enter' is not its own step:
     the type_text plan already carries submit=True."""
@@ -546,21 +554,72 @@ def split_compound(utterance: str) -> list[str]:
     return parts
 
 
-_GOOGLE = re.compile(r"\bgoogle\b", re.I)
+_ENGINE_NAMES = {
+    "google_maps": r"google maps|maps",
+    "google": r"google(?! maps)",
+    "youtube": r"youtube|you tube",
+    "amazon": r"amazon",
+    "wikipedia": r"wikipedia|wiki",
+    "github": r"git ?hub",
+    "twitter_x": r"twitter|tweets?",
+    "reddit": r"reddit",
+    "spotify": r"spotify",
+    "perplexity": r"perplexity",
+}
+_ENGINE_HINTS = {
+    "youtube": r"videos?|watch|channel|music video",
+    "amazon": r"buy|order|shop|price",
+    "google_maps": r"directions|near me|nearby|route",
+}
+_ENGINE_RE = {k: re.compile(rf"\b(?:{v})\b", re.I) for k, v in _ENGINE_NAMES.items()}
+_HINT_RE = {k: re.compile(rf"\b(?:{v})\b", re.I) for k, v in _ENGINE_HINTS.items()}
+
+
+def named_engines(text: str) -> list[str]:
+    """Search engines the words name, in the order they are said."""
+    hits = [(m.start(), k) for k, rx in _ENGINE_RE.items() if (m := rx.search(text))]
+    return [k for _, k in sorted(hits)]
+
+
+def resolve_engine(plan: Plan, front_site: Callable[[], str | None]) -> Plan:
+    """Laya's engine for 'search X' is a guess when no engine is named (the pilot sent 'search
+    mrbeast' to perplexity). A named engine wins, then a pick the words hint at ('videos of X' on
+    youtube), then the site open in the front browser tab when it has a search, then google."""
+    if plan.action != "web_search" or plan.error:
+        return plan
+    engine = plan.args.get("engine")
+    named = named_engines(plan.utterance)
+    if engine in named or (not named and engine in _HINT_RE and _HINT_RE[engine].search(plan.utterance)):
+        return plan
+    if named:
+        engine = named[0]
+    else:
+        site = front_site()
+        engine = site if site in actions.SEARCH_ENGINES else "google"
+    return replace(plan, args={**plan.args, "engine": engine})
+
+
+def search_to_site(plan: Plan) -> Plan:
+    """'Search YouTube.' names a site, not a query: open it instead of searching it for 'YouTube'."""
+    engine = plan.args.get("engine")
+    if plan.action == "web_search" and engine in actions.SITES and engine in _ENGINE_RE \
+            and _ENGINE_RE[engine].fullmatch(plan.args.get("query", "").strip(" .!?")):
+        args = {k: v for k, v in plan.args.items() if k not in ("engine", "query")}
+        return replace(plan, action="open_website", args={**args, "url": actions.SITES[engine], "site": engine})
+    return plan
 
 
 def merge_site_searches(steps: list[tuple[str, Plan]]) -> list[tuple[str, Plan]]:
     """'open youtube' then 'search veritasium' is one youtube search, not a home page plus a google search.
 
-    A search whose engine was not named (the engine question defaults to google) takes the site
-    the previous step opened, when that site has a search engine."""
+    A search that names no engine takes the site the previous step opened, when that site has a
+    search engine."""
     out: list[tuple[str, Plan]] = []
     for part, plan in steps:
         if out and plan.action == "web_search" and not plan.error:
             prev_part, prev = out[-1]
             site = prev.args.get("site")
-            unnamed = plan.args.get("engine") == "google" and not _GOOGLE.search(part)
-            if prev.action == "open_website" and not prev.error and site in actions.SEARCH_ENGINES and unnamed:
+            if prev.action == "open_website" and not prev.error and site in actions.SEARCH_ENGINES and not named_engines(part):
                 merged = replace(plan, utterance=f"{prev_part} and {part}", args={**plan.args, "engine": site},
                                  confidence=min(prev.confidence, plan.confidence))
                 out[-1] = (merged.utterance, merged)
