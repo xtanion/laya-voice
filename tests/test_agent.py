@@ -489,3 +489,103 @@ def test_chess_position_replays_figurine_moves_and_detects_turn():
     assert (round(x), round(y)) == (648, 670)
     xf, yf = c.square_center({"rect": {"x": 229, "y": 66, "w": 744, "h": 744}, "flipped": True}, c.chess.E2)
     assert (round(xf), round(yf)) == (554, 206)
+
+
+class Scripted:
+    """Staged Laya stand-in: answers each question from a script and records what it was asked."""
+
+    model = "laya-test"
+
+    def __init__(self, choices=None, nouls=None, conf=None):
+        self.choices, self.nouls, self.conf, self.calls = choices or {}, nouls or {}, conf or {}, []
+
+    def answer(self, state, questions):
+        self.calls.append((state, questions))
+        out = {}
+        for qid, q in questions.items():
+            if q["type"] == "noul":
+                out[qid] = {"noul": self.nouls.get(qid, 0.0)}
+            else:
+                ids = list(q["criteria"])
+                pick = self.choices.get(qid, ids[0])
+                pick = pick if pick in ids else ids[0]
+                out[qid] = {**choice(ids, pick), "confidence": self.conf.get(qid, 1.0)}
+        return out
+
+
+@pytest.fixture
+def staged(monkeypatch):
+    def use(**kw):
+        fake = Scripted(**kw)
+        monkeypatch.setattr(policy, "_provider", lambda: fake)
+        monkeypatch.setattr(policy.config, "DECISION_PROVIDER", "laya")
+        monkeypatch.setattr(policy, "post_json", Mock(side_effect=AssertionError("no TypeSafe call under laya")))
+        return fake
+    return use
+
+
+def test_staged_click_picks_from_a_short_list_with_small_state(staged):
+    fake = staged(nouls={"click": 0.9}, choices={"target": "3"})
+    d = policy.choose(screen(), "click go", [])
+    assert (d["operation"], d["choice"]) == ("CLICK", "e3")
+    first_state, first_questions = fake.calls[0]
+    assert set(first_state) == {"goal", "app", "window", "recent_actions", "matching_controls"}
+    assert "done" not in first_questions and "WAIT" not in first_questions["operation"]["criteria"]
+    assert all(len(q.get("criteria", {})) <= policy.STAGED_TARGETS for _, qs in fake.calls[1:] for q in qs.values())
+
+
+def test_staged_done_is_a_question_only_after_a_step(staged):
+    fake = staged(nouls={"done": 0.9, "click": 0.9})
+    d = policy.choose(screen(), "click go", [{"kind": "click", "action": "Click Go", "screen_changed": True}])
+    assert d["operation"] == "DONE" and d["choice"] == "DONE"
+    assert "WAIT" in fake.calls[0][1]["operation"]["criteria"]
+
+
+def test_staged_confident_non_click_step_wins(staged):
+    staged(nouls={"click": 0.9}, choices={"operation": "PRESS_KEY", "target": "enter"})
+    d = policy.choose(screen(), "press enter", [])
+    assert (d["operation"], d["choice"]) == ("PRESS_KEY", "key:enter")
+
+
+def test_staged_weak_click_match_falls_back_to_the_picked_step(staged):
+    staged(nouls={"click": 0.9}, choices={"operation": "PRESS_KEY", "target": "enter"},
+           conf={"operation": 0.3, "target": 0.2})
+    d = policy.choose(screen(), "submit it", [])
+    assert (d["operation"], d["choice"]) == ("PRESS_KEY", "key:enter")
+
+
+def test_staged_app_not_installed_is_blocked(staged):
+    staged(choices={"operation": "OPEN_APP"}, conf={"operation": 0.6, "target": 0.1})
+    d = policy.choose(screen(), "open spotify", [])
+    assert d["operation"] == "BLOCKED" and d["target"] is None
+
+
+def test_staged_type_text_selects_a_code_cut_candidate(staged):
+    staged(choices={"operation": "TYPE_TEXT", "target": "1"}, conf={"operation": 0.8})
+    d = policy.choose(screen(), "type hello world", [])
+    assert d["operation"] == "TYPE_TEXT" and d["choice"] == "e1"
+    assert d["selected_text"] == "hello world"
+
+
+SIDEBAR = {
+    "play": "Play (k)",
+    "air": "Phil Collins - In The Air Tonight (2016 Remaster) 5 minutes, 36 seconds Phil Collins",
+    "paradise": "Phil Collins - Another Day In Paradise [Audio HQ] HD 5 minutes, 23 seconds Phil Collins Music",
+    "wrecked": "Imagine Dragons - Wrecked (Official Music Video) 4 minutes, 37 seconds ImagineDragons",
+    "mix": "RÜFÜS DU SOL, Calvin Harris, Fred again.. | Sunset Lake Mix with Friends 49 minutes",
+    "share": "Share",
+}
+
+
+def test_shortlist_ignores_command_words_and_keeps_only_strong_matches():
+    assert policy.shortlist("play wrecked by imagine dragons", SIDEBAR) == ["wrecked"]
+    assert set(policy.shortlist("play the phil collins song", SIDEBAR)) == {"air", "paradise"}
+    assert policy.shortlist("play the rufus du sol mix", SIDEBAR)[0] == "mix"
+    assert policy.shortlist("click play", SIDEBAR)[0] == "play"
+
+
+def test_option_label_drops_durations_and_shows_the_part_the_user_said():
+    assert policy.option_label(SIDEBAR["wrecked"], limit=80) == "Imagine Dragons - Wrecked (Official Music Video) ImagineDragons"
+    shown = policy.option_label(SIDEBAR["mix"], "play the sunset lake mix", 50)
+    assert "Sunset Lake Mix" in shown and "RUFUS" not in shown
+    assert policy.option_label(SIDEBAR["mix"]).startswith("RUFUS DU SOL")

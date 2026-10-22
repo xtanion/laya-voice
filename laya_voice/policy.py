@@ -161,7 +161,199 @@ def text_candidates(goal: str) -> dict[str, str]:
     return {f"c{i}": span for i, span in enumerate(spans[:18])}
 
 
+STAGED_TARGETS = 8
+STAGED_OPERATIONS = {
+    "CLICK": "click a button, link, tab, video, or other control on the screen",
+    "TYPE_TEXT": "type text into a field",
+    "OPEN_APP": "open or switch to a different application",
+    "PRESS_KEY": "press a key such as enter, escape, tab, or an arrow",
+    "SCROLL_DOWN": "scroll down to find something not visible yet",
+    "SCROLL_UP": "scroll up to find something not visible yet",
+    "WAIT": "wait for the page or window to finish loading",
+    "BLOCKED": "nothing on this screen can make progress",
+}
+_STAGED_DONE_RULES = "Do `recent_actions` already accomplish everything `goal` asks for?"
+_STAGED_CLICK_RULES = "Is clicking one of `matching_controls` the next step to do `goal`?"
+_STAGED_OPERATION_RULES = ("`goal` is what the user asked the computer to do. `recent_actions` is what has been done so far, "
+                           "`app` and `window` what is in front now, and `matching_controls` the on-screen controls whose "
+                           "names best match the goal. Which single next step advances the goal?")
+_STAGED_TARGET_RULES = {
+    "CLICK": "Which of these on-screen controls should be clicked to do `goal`?",
+    "TYPE_TEXT": "Which of these fields should the text for `goal` be typed into?",
+    "OPEN_APP": "Which application does `goal` need?",
+    "PRESS_KEY": "Which key should be pressed to do `goal`?",
+}
+_WORD = re.compile(r"[a-z0-9]+")
+_PROVIDER: Any = None
+
+
+def _provider() -> Any:
+    global _PROVIDER
+    if _PROVIDER is None:
+        from .providers import LayaProvider
+
+        _PROVIDER = LayaProvider()
+    return _PROVIDER
+
+
+_COMMAND_WORDS = {"play", "click", "open", "watch", "tap", "press", "select", "choose", "start", "the", "this", "that",
+                  "video", "song", "button", "link", "one", "please", "can", "you", "for", "and", "with", "from"}
+_DURATION = re.compile(r"\s*\b\d+ (?:hours?|minutes?|seconds?)(?:,? \d+ (?:minutes?|seconds?))*\b", re.I)
+
+
+def _words(text: str) -> list[str]:
+    import unicodedata
+
+    plain = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode().lower()
+    return [w for w in _WORD.findall(plain) if len(w) > 2 or w.isdigit()]
+
+
+def shortlist(goal: str, labels: dict[str, str], k: int = STAGED_TARGETS) -> list[str]:
+    """The ids whose labels best match the goal, at most k.
+
+    Command words ('play', 'click', 'video') are ignored when the goal has other words, so 'play X
+    by Y' matches the X link rather than the player's Play button. When some labels share several
+    words with the goal, only those close to the best are kept: two Phil Collins videos, not eight
+    mixed controls."""
+    from difflib import SequenceMatcher
+
+    words = _words(goal)
+    content = [w for w in words if w not in _COMMAND_WORDS] or words
+
+    def shared(key: str) -> int:
+        tokens = _words(labels[key])
+        return sum(any(t.startswith(w[:5]) or w.startswith(t[:5]) for t in tokens) for w in content)
+
+    counts = {key: shared(key) for key in labels}
+    ratio = {key: SequenceMatcher(None, goal.lower(), labels[key].lower()).ratio() for key in labels}
+    ranked = sorted(labels, key=lambda key: (counts[key] + ratio[key]), reverse=True)
+    best = counts[ranked[0]] if ranked else 0
+    if best >= 2:
+        ranked = [key for key in ranked if counts[key] >= best - 1]
+    return ranked[:k]
+
+
+def option_label(label: str, goal: str = "", limit: int = 60) -> str:
+    """The label without durations, cut to `limit` around the first goal word it contains, so a long
+    'Artist, Artist | Sunset Lake Mix' label still shows the part the user said."""
+    import unicodedata
+
+    folded = unicodedata.normalize("NFKD", label.removeprefix("Focus ")).encode("ascii", "ignore").decode()
+    text = _DURATION.sub("", folded).strip()
+    if len(text) <= limit:
+        return text
+    plain = text.lower()
+    hits = [plain.find(w) for w in _words(goal) if w not in _COMMAND_WORDS and plain.find(w) >= 0]
+    start = max(0, min(hits) - 12) if hits and min(hits) + 12 > limit else 0
+    return ("…" if start else "") + text[start:start + limit]
+
+
+def _recent(history: list[dict[str, Any]]) -> list[str]:
+    return [f"{h.get('kind') or ''} {h.get('action') or ''}".strip() + ("" if h.get("screen_changed") else " (no change)")
+            for h in history[-4:]]
+
+
+STAGED_SURE = 0.5
+STAGED_TARGET_MIN = {"CLICK": 0.4, "OPEN_APP": 0.3}
+
+
+def _staged_target(provider: Any, goal: str, operation: str, group: dict[str, dict]) -> tuple[str, dict, str | None, dict]:
+    from .brain import shortlist_apps
+
+    if operation == "OPEN_APP":
+        criteria: dict[str, Any] = {name: None for name in shortlist_apps(goal, list(group), STAGED_TARGETS)}
+    elif operation == "PRESS_KEY":
+        keep = shortlist(goal, {key: f"{key}: {a['label']}" for key, a in group.items()})
+        criteria = {key: group[key]["label"] for key in keep}
+    else:
+        keep = shortlist(goal, {i: a["label"].removeprefix("Focus ") for i, a in group.items()})
+        criteria = {i: f"{option_label(group[i]['label'], goal)} ({group[i].get('role', '')})" for i in keep}
+    asked: dict[str, Any] = {"target": {"type": "choice", "criteria": criteria, "instructions": _STAGED_TARGET_RULES[operation]}}
+    cands: dict[str, str] = {}
+    if operation == "TYPE_TEXT":
+        cands = dict(list(text_candidates(goal).items())[:STAGED_TARGETS])
+        if cands:
+            asked["text_value"] = {"type": "choice", "criteria": cands, "instructions": TEXT_SELECT}
+    answers = provider.answer({"goal": goal}, asked)
+    target_answer = validate_choice(answers.get("target", {}), criteria)
+    text = cands[validate_choice(answers.get("text_value", {}), cands)["choice"]] if cands else None
+    return target_answer["choice"], target_answer, text, {k: answers.get(k) for k in asked}
+
+
+def choose_staged(state: dict[str, Any], goal: str, history: list[dict[str, Any]]) -> dict[str, Any]:
+    """Laya edition of `choose`: Laya reads at most 512 tokens and a few options per question, so instead
+    of one request over the whole screen it answers the operation first, then a target from a short list."""
+    provider = _provider()
+    elements, targets, controls = action_space(state["actions"])
+    operations = {k: v for k, v in STAGED_OPERATIONS.items()
+                  if (k in targets or k in controls or k == "BLOCKED") and (k != "WAIT" or history)}
+    clickable = {i: a["label"].removeprefix("Focus ") for i, a in targets.get("CLICK", {}).items()}
+    view = {"goal": goal, "app": state["app"], "window": state["title"][:120], "recent_actions": _recent(history),
+            "matching_controls": [option_label(clickable[i], goal, 50) for i in shortlist(goal, clickable, 4)]}
+    started = time.perf_counter()
+    raw: dict[str, Any] = {}
+    asked: dict[str, Any] = {"operation": {"type": "choice", "criteria": operations, "instructions": _STAGED_OPERATION_RULES}}
+    if history:
+        # Nothing can be done before a step has run, so DONE is only a question once there is history.
+        asked["done"] = {"type": "noul", "instructions": _STAGED_DONE_RULES}
+    if "CLICK" in targets:
+        asked["click"] = {"type": "noul", "instructions": _STAGED_CLICK_RULES}
+    raw.update(provider.answer(view, asked))
+    done_p = float(raw.get("done", {}).get("noul", 0.0)) if history else 0.0
+    click_p = float(raw.get("click", {}).get("noul", 0.0)) if "CLICK" in targets else 0.0
+    picked = validate_choice(raw.get("operation", {}), operations)
+    target = target_answer = selected_text = None
+    probabilities: dict[str, float] = {}
+    if done_p > 0.5:
+        operation_answer = {"choice": "DONE", "confidence": done_p, "probabilities": {"DONE": done_p}}
+    elif picked["choice"] not in ("CLICK", "BLOCKED") and picked["confidence"] >= STAGED_SURE:
+        operation_answer = picked
+    else:
+        operation_answer = {"choice": "CLICK", "confidence": click_p, "probabilities": {"CLICK": click_p}}
+        if click_p <= 0.5:
+            operation_answer = picked if picked["choice"] != "CLICK" else {"choice": "BLOCKED", "confidence": 1 - click_p,
+                                                                            "probabilities": {"BLOCKED": 1 - click_p}}
+    operation = operation_answer["choice"]
+    tried: set[str] = set()
+    while operation in targets and operation not in tried:
+        tried.add(operation)
+        target, target_answer, selected_text, raw_target = _staged_target(provider, goal, operation, targets[operation])
+        raw.update(raw_target)
+        if target_answer["confidence"] >= STAGED_TARGET_MIN.get(operation, 0.0):
+            break
+        # A weak best match means the thing the goal names is not on this screen (or not installed).
+        fallback = picked["choice"] if picked["choice"] not in tried | {"CLICK"} else "BLOCKED"
+        operation, target, target_answer, selected_text = fallback, None, None, None
+        operation_answer = {"choice": fallback, "confidence": picked["probabilities"].get(fallback, 1.0),
+                            "probabilities": picked["probabilities"]}
+    if operation in targets and target is not None:
+        group = targets[operation]
+        choice = group[target]["id"]
+        probabilities = {group[k]["id"]: v for k, v in target_answer["probabilities"].items()}
+    else:
+        choice = controls[operation]["id"] if operation in controls else operation
+        probabilities[choice] = operation_answer["probabilities"].get(operation, operation_answer["confidence"])
+    return {
+        "choice": choice,
+        "operation": operation,
+        "target": target,
+        "confidence": operation_answer["confidence"],
+        "probabilities": probabilities,
+        "operation_probabilities": operation_answer["probabilities"],
+        "target_probabilities": target_answer["probabilities"] if target_answer else {},
+        "target_confidence": target_answer["confidence"] if target_answer else None,
+        "selected_text": selected_text,
+        "raw_answers": raw,
+        "model": provider.model,
+        "usage": {},
+        "latency_ms": round((time.perf_counter() - started) * 1000),
+        "request": {"state": view},
+    }
+
+
 def choose(state: dict[str, Any], goal: str, history: list[dict[str, Any]], *, text_model: bool | None = None) -> dict[str, Any]:
+    if config.DECISION_PROVIDER == "laya":
+        return choose_staged(state, goal, history)
     elements, targets, controls = action_space(state["actions"])
     operations = {key: LABELS[key] for key in targets}
     operations.update({key: value["label"] for key, value in controls.items()})
