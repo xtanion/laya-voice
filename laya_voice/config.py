@@ -35,6 +35,7 @@ JEV_MODEL = os.environ.get("JEV_MODEL", "jev-latest")
 WHISPER_MODEL = Path(os.environ.get("WHISPER_MODEL", ROOT / "models" / "ggml-base.en.bin"))
 WHISPER_PORT = int(os.environ.get("WHISPER_PORT", "8178"))
 WHISPER_THREADS = int(os.environ.get("WHISPER_THREADS", "6"))
+WHISPER_PROMPT = os.environ.get("WHISPER_PROMPT", "")
 
 SAMPLE_RATE = 16000
 

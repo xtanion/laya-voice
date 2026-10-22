@@ -78,6 +78,8 @@ class WhisperServer:
         files = {"file": ("audio.wav", _wav_bytes(pcm), "audio/wav")}
         data = {"response_format": "json", "temperature": "0.0", "no_timestamps": "true",
                 "language": "en"}
+        if config.WHISPER_PROMPT:
+            data["prompt"] = config.WHISPER_PROMPT
         r = self.http.post(self.url + "/inference", files=files, data=data)
         r.raise_for_status()
         text = (r.json().get("text") or "").strip()

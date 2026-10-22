@@ -3,24 +3,35 @@
     uv run laya-eval --provider laya                      # dev split, with threshold sweep
     uv run laya-eval --provider laya --split test         # held-out: report only, no sweep
     uv run laya-eval --provider laya --out results.json   # keep the per-case rows
+    uv run laya-eval --provider laya --asr Samantha,Daniel  # speak each case with `say`, decide on the whisper transcript
 
 A case either expects an action with arguments, or expects to be rejected (not
 executed). "Executes" mirrors main.execute: stop always runs; anything else runs
 only without an error, when not `none`, and at or above the confidence threshold.
 The installed apps and frontmost app come from data/eval/context.json so results
 do not depend on the machine.
+
+With --asr every case is spoken once per voice and the model sees whisper.cpp's raw
+transcript, as main does. Transcripts are cached per voice and whisper model in
+results/asr/, so reruns only redo the decision step.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import statistics
+import subprocess
+import tempfile
 import time
+import wave
 from collections import Counter, defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
+
+import numpy as np
 
 from . import actions, config
 from .brain import QUESTIONS_VERSION, Brain, Plan, questions_fingerprint
@@ -38,6 +49,8 @@ class Case:
     category: str
     utterance: str
     expect: dict[str, Any]
+    spoken: str | None = None
+    voice: str | None = None
 
     @property
     def reject(self) -> bool:
@@ -77,7 +90,7 @@ def executes(plan: Plan, threshold: float) -> bool:
 
 
 def _norm(v: Any) -> Any:
-    return " ".join(v.lower().split()) if isinstance(v, str) else v
+    return "".join(ch for ch in v.lower() if ch.isalnum()) if isinstance(v, str) else v
 
 
 def matches(plan: Plan, expect: dict[str, Any]) -> bool:
@@ -98,6 +111,42 @@ def run(brain: Brain, cases: list[Case], ctx: dict[str, Any], warmup: bool = Tru
         if warmup:
             brain.evaluate("warm up")
         return [Result(c, brain.evaluate(c.utterance)) for c in cases]
+
+
+ASR_CACHE = config.ROOT / "results" / "asr"
+
+
+def speak(text: str, voice: str) -> np.ndarray:
+    with tempfile.TemporaryDirectory() as d:
+        out = Path(d) / "say.wav"
+        subprocess.run(["say", "-v", voice, "--file-format=WAVE", f"--data-format=LEI16@{config.SAMPLE_RATE}",
+                        "-o", str(out), text], check=True)
+        with wave.open(str(out)) as w:
+            pcm = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
+    return pcm.astype(np.float32) / 32768.0
+
+
+def transcribe_cases(cases: list[Case], voices: list[str]) -> list[Case]:
+    from .stt import WhisperServer
+
+    stt = None
+    out = []
+    for voice in voices:
+        prompt = f".p{hashlib.sha256(config.WHISPER_PROMPT.encode()).hexdigest()[:8]}" if config.WHISPER_PROMPT else ""
+        path = ASR_CACHE / f"{config.WHISPER_MODEL.stem}{prompt}.{voice.replace(' ', '_')}.json"
+        cache = json.loads(path.read_text()) if path.exists() else {}
+        for c in cases:
+            if c.utterance not in cache:
+                if stt is None:
+                    stt = WhisperServer()
+                    stt.start()
+                cache[c.utterance] = stt.transcribe(speak(c.utterance, voice))
+            out.append(Case(c.id, c.group, c.split, c.category, cache[c.utterance], c.expect, spoken=c.utterance, voice=voice))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(cache, indent=1))
+    if stt:
+        stt.stop()
+    return out
 
 
 def _rate(n: int, d: int) -> float | None:
@@ -153,7 +202,8 @@ def suggest_threshold(results: list[Result], max_false_rate: float, thresholds: 
 def _row(r: Result, threshold: float) -> dict[str, Any]:
     p = r.plan
     return {"id": r.case.id, "split": r.case.split, "category": r.case.category, "utterance": r.case.utterance,
-            "expect": r.case.expect, "action": p.action, "args": {k: v for k, v in p.args.items() if k not in ("addressed",)},
+            "spoken": r.case.spoken, "voice": r.case.voice, "expect": r.case.expect, "action": p.action,
+            "args": {k: v for k, v in p.args.items() if k not in ("addressed",)},
             "confidence": round(p.confidence, 3), "latency_ms": p.latency_ms, "error": p.error, "outcome": outcome(r, threshold)}
 
 
@@ -201,8 +251,13 @@ def report(results: list[Result], threshold: float, split: str, max_false_rate: 
                 continue
             got = f"rejected: {p.error}" if p.error else f"{p.action} {_brief(p.args)}"
             want = "reject" if r.case.reject else " ".join(f"{k}={v}" for k, v in r.case.expect.items())
-            lines.append(f"  {o:<13}{p.confidence:5.2f}  {r.case.utterance!r} -> {got}  ({want})")
+            heard = f"{r.case.spoken!r} heard as " if r.case.spoken and r.case.spoken != r.case.utterance else ""
+            lines.append(f"  {o:<13}{p.confidence:5.2f}  {heard}{r.case.utterance!r} -> {got}  ({want})")
     return "\n".join(lines)
+
+
+def _wer_words(text: str | None) -> list[str]:
+    return "".join(ch if ch.isalnum() or ch in " '" else " " for ch in (text or "").lower()).split()
 
 
 def _brief(args: dict[str, Any]) -> str:
@@ -219,9 +274,17 @@ def main() -> None:
     p.add_argument("--show", choices=["failures", "all", "none"], default="failures")
     p.add_argument("--data", type=Path, default=DATA / "commands.jsonl")
     p.add_argument("--out", type=Path, help="write metrics and per-case rows as JSON")
+    p.add_argument("--asr", metavar="VOICES", help="comma-separated `say` voices; decide on whisper transcripts")
     args = p.parse_args()
 
     cases = load_cases(args.data, args.split)
+    if args.asr:
+        voices = [v.strip() for v in args.asr.split(",") if v.strip()]
+        cases = transcribe_cases(cases, voices)
+        changed = sum(_wer_words(c.spoken) != _wer_words(c.utterance) for c in cases)
+        print(f"asr: {len(cases)} clips ({', '.join(voices)}), {changed} transcripts differ from the text "
+              f"(ignoring case and punctuation), whisper {config.WHISPER_MODEL.name}"
+              + (f", prompt {config.WHISPER_PROMPT!r}" if config.WHISPER_PROMPT else ""))
     brain = Brain(make_provider(args.provider))
     t0 = time.perf_counter()
     results = run(brain, cases, load_context())
@@ -229,7 +292,7 @@ def main() -> None:
     print(report(results, args.threshold, args.split, args.max_false_rate, args.show))
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
-        args.out.write_text(json.dumps({"provider": brain.label, "split": args.split, "questions_version": QUESTIONS_VERSION,
+        args.out.write_text(json.dumps({"provider": brain.label, "split": args.split, "asr": args.asr, "questions_version": QUESTIONS_VERSION,
                                         "questions_fingerprint": questions_fingerprint(), "metrics": score(results, args.threshold),
                                         "cases": [_row(r, args.threshold) for r in results]}, indent=2))
         print(f"\nwrote {args.out}")

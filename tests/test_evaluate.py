@@ -179,3 +179,9 @@ def test_report_renders_and_sweeps_only_on_dev():
     test = evaluate.report(results(), 0.35, "test", 0.02, "failures")
     assert "lowest threshold" in dev or "no threshold" in dev
     assert "threshold" in test and "lowest threshold" not in test and "no threshold" not in test
+
+
+def test_text_args_match_ignoring_case_punctuation_and_hyphens():
+    plan = Plan("search amazon for usb c cable", "web_search", 0.9, {"engine": "amazon", "query": "USB-C cable."})
+    assert evaluate.matches(plan, {"action": "web_search", "engine": "amazon", "query": "usb c cable"})
+    assert not evaluate.matches(plan, {"action": "web_search", "engine": "amazon", "query": "usb cable"})
