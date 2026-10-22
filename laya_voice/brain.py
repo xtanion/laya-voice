@@ -11,7 +11,7 @@ import hashlib
 import json
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from difflib import SequenceMatcher
 from typing import Any
 
@@ -544,3 +544,26 @@ def split_compound(utterance: str) -> list[str]:
             return [utterance]
         parts[-1] = parts[-1] + " and hit enter"
     return parts
+
+
+_GOOGLE = re.compile(r"\bgoogle\b", re.I)
+
+
+def merge_site_searches(steps: list[tuple[str, Plan]]) -> list[tuple[str, Plan]]:
+    """'open youtube' then 'search veritasium' is one youtube search, not a home page plus a google search.
+
+    A search whose engine was not named (the engine question defaults to google) takes the site
+    the previous step opened, when that site has a search engine."""
+    out: list[tuple[str, Plan]] = []
+    for part, plan in steps:
+        if out and plan.action == "web_search" and not plan.error:
+            prev_part, prev = out[-1]
+            site = prev.args.get("site")
+            unnamed = plan.args.get("engine") == "google" and not _GOOGLE.search(part)
+            if prev.action == "open_website" and not prev.error and site in actions.SEARCH_ENGINES and unnamed:
+                merged = replace(plan, utterance=f"{prev_part} and {part}", args={**plan.args, "engine": site},
+                                 confidence=min(prev.confidence, plan.confidence))
+                out[-1] = (merged.utterance, merged)
+                continue
+        out.append((part, plan))
+    return out

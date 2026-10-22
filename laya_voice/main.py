@@ -23,7 +23,7 @@ import time
 import numpy as np
 
 from . import actions, config
-from .brain import Brain, Plan, split_compound
+from .brain import Brain, Plan, merge_site_searches, split_compound
 from .overlay import NullOverlay
 from .persona import flavor
 from .tts import Speaker
@@ -188,11 +188,13 @@ def handle(brain: Brain, speaker: Speaker, utterance: str, dry: bool, depth: int
     if plan.args.get("compound") and depth == 0:
         parts = split_compound(utterance)
         if len(parts) > 1:
-            print(f"  compound: {parts}")
-            for p in parts:
-                if not handle(brain, speaker, p, dry, depth=1):
+            steps = merge_site_searches([(p, brain.evaluate(p)) for p in parts])
+            print(f"  compound: {[p for p, _ in steps]}")
+            for i, (p, step) in enumerate(steps):
+                if not handle(brain, speaker, p, dry, depth=1, plan=step):
                     return False
-                time.sleep(0.35)  # let the previous app/page come up
+                if i < len(steps) - 1:
+                    time.sleep(0.35)  # let the previous app/page come up
             return True
     try:
         reply = execute(plan, dry, speaker)

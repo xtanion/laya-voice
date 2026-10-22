@@ -16,6 +16,7 @@ from laya_voice.brain import (
     SHORTCUT_GROUPS,
     STAGE_QUESTIONS,
     Brain,
+    Plan,
     block,
     for_staged,
     questions_fingerprint,
@@ -529,3 +530,53 @@ def test_question_text_is_pinned_to_its_version():
     """Changing any staged question text needs QUESTIONS_VERSION bumped and a new entry here,
     because fine-tuned checkpoints are trained on the exact strings."""
     assert questions_fingerprint() == QUESTION_FINGERPRINTS[QUESTIONS_VERSION]
+
+
+def _site(site, conf=0.9):
+    return Plan("open " + site, "open_website", conf, {"site": site, "url": actions.SITES[site]})
+
+
+def _search(utterance, engine, query, conf=0.95):
+    return Plan(utterance, "web_search", conf, {"engine": engine, "query": query})
+
+
+def test_open_site_then_unnamed_search_merges_into_site_search():
+    steps = brain.merge_site_searches([("open YouTube", _site("youtube", 0.9)),
+                                       ("search veritasium", _search("search veritasium", "google", "veritasium"))])
+    assert len(steps) == 1
+    utterance, plan = steps[0]
+    assert utterance == "open YouTube and search veritasium"
+    assert plan.action == "web_search"
+    assert plan.args["engine"] == "youtube" and plan.args["query"] == "veritasium"
+    assert plan.confidence == 0.9
+
+
+@pytest.mark.parametrize("steps", [
+    [("open youtube", _site("youtube")), ("search google for cats", _search("search google for cats", "google", "cats"))],
+    [("open youtube", _site("youtube")), ("search amazon for cats", _search("search amazon for cats", "amazon", "cats"))],
+    [("open gmail", _site("gmail")), ("search invoices", _search("search invoices", "google", "invoices"))],
+    [("open slack", Plan("open slack", "open_app", 0.9, {"app": "Slack"})), ("search cats", _search("search cats", "google", "cats"))],
+    [("search cats", _search("search cats", "google", "cats")), ("open youtube", _site("youtube"))],
+], ids=["google named", "other engine named", "site without search", "app not site", "search first"])
+def test_merge_leaves_other_compounds_alone(steps):
+    assert brain.merge_site_searches(steps) == steps
+
+
+def test_merge_skips_failed_plans():
+    failed = Plan("search cats", "none", 0.0, error="laya: boom")
+    steps = [("open youtube", _site("youtube")), ("search cats", failed)]
+    assert brain.merge_site_searches(steps) == steps
+
+
+def test_compound_open_youtube_and_search_runs_one_youtube_search(monkeypatch):
+    plans = {"open YouTube and search veritasium": Plan("open YouTube and search veritasium", "open_website", 0.6,
+                                                        {"site": "youtube", "url": actions.SITES["youtube"], "compound": True}),
+             "open YouTube": _site("youtube"),
+             "search veritasium": _search("search veritasium", "google", "veritasium")}
+    fake = Mock()
+    fake.evaluate.side_effect = lambda u: plans[u]
+    ran = []
+    monkeypatch.setattr(main, "execute", lambda plan, dry, speaker=None: ran.append(plan) or "")
+    monkeypatch.setattr(main.time, "sleep", lambda s: None)
+    assert main.handle(fake, Mock(), "open YouTube and search veritasium", dry=True)
+    assert [(p.action, p.args["engine"]) for p in ran] == [("web_search", "youtube")]
